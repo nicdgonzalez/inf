@@ -70,7 +70,7 @@ class LexerIterator:
         return next(self)
 
     def handle_string(self) -> Token:
-        literal = '"'
+        literal = ""
 
         while self.index < len(self.input):
             c = self.input[self.index]
@@ -81,11 +81,12 @@ class LexerIterator:
                 self.index += 2
                 continue
 
-            literal += c
             self.index += 1
 
             if c == '"':
                 break
+
+            literal += c
 
         return Token(literal=literal, kind=TokenKind.STRING)
 
