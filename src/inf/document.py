@@ -17,31 +17,29 @@ class Document:
 
         return cls(sections=sections)
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> dict["CaseInsensitiveKey", Any]:
         # INF specification states:
         #
         # > Section names, entries, and directives are case-insensitive.
         #
         # <https://learn.microsoft.com/en-us/windows-hardware/drivers/install/general-syntax-rules-for-inf-files#-case-sensitivity>
-        d: dict[str, Any] = CaseInsensitiveDict()
+        d: CaseInsensitiveDict[CaseInsensitiveKey, Any] = CaseInsensitiveDict()
 
         for section in self.sections:
-            d[section.name] = CaseInsensitiveDict(
-                {
-                    # Each element represents a single line in the file.
-                    "": [
-                        # Flatten the inner lists if there is only one element.
-                        e.value[0] if len(e.value) == 1 else e.value
-                        for e in section.entries
-                        if e.key is None
-                    ],
-                    **{
-                        e.key: e.value
-                        for e in section.entries
-                        if e.key is not None
-                    },
-                }
-            )
+            d[section.name] = CaseInsensitiveDict()
+            d[section.name][""] = []
+
+            # Each element represents a single line in the file.
+            for entry in section.entries:
+                if entry.key is None:
+                    # Flatten the inner lists if there is only one element.
+                    d[section.name][""].append(
+                        entry.value[0]
+                        if len(entry.value) == 1
+                        else entry.value
+                    )
+                else:
+                    d[section.name][entry.key] = entry.value
 
         return d
 
@@ -69,7 +67,7 @@ class CaseInsensitiveKey:
         return repr(self.key)
 
 
-class CaseInsensitiveDict(dict[str, Any]):
+class CaseInsensitiveDict(dict[CaseInsensitiveKey, Any]):
     def __setitem__(self, key: str, value: Any) -> None:
         super().__setitem__(CaseInsensitiveKey(key), value)
 
