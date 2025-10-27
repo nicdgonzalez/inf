@@ -81,13 +81,19 @@ class Entry:
                         assert p.current.literal.isnumeric(), p.current.literal
                         i = int(p.current.literal)
                         value.append(i)
+                        p.advance()
                     elif p.current.kind == TokenKind.COMMA:
                         # The value is still significant, but it's empty.
                         value.append("")
+                        # There is no item, so no need to advance.
                     else:
                         value.append(p.current.literal)
+                        p.advance()
 
-                    p.advance()
+                    # Check before advancing to avoid advancing passed
+                    # the newline on the last element of the array.
+                    if p.current.kind == TokenKind.COMMA:
+                        p.advance()
 
                 return cls(key=None, value=value)
             case _:
