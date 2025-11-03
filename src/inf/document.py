@@ -2,6 +2,7 @@ from typing import Any
 
 from .parser import Parser
 from .section import Section
+from .token import TokenKind
 
 
 class Document:
@@ -13,6 +14,9 @@ class Document:
         sections: list[Section] = []
 
         while p.current is not None:
+            if p.current.kind == TokenKind.NEWLINE:
+                p.advance()
+
             sections.append(Section.parse(p))
 
         return cls(sections=sections)
