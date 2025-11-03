@@ -32,7 +32,7 @@ def load(data: str) -> CaseInsensitiveDict[CaseInsensitiveKey, Any]:
     I implemented only what I needed without referencing the formal
     specification. The parsing is nowhere near accurate. Proceed with caution!
     """
-    lexer = Lexer(input=data)
+    lexer = Lexer(input=data.strip())
     tokens = iter(lexer)
     parser = Parser(tokens)
     document = Document.parse(parser)
