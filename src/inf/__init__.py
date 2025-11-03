@@ -1,13 +1,14 @@
 from typing import Any
 
-from .document import Document
+from . import utils
+from .document import CaseInsensitiveDict, CaseInsensitiveKey, Document
 from .lexer import Lexer
 from .parser import Parser
 
-__all__ = ("load",)
+__all__ = ("load", "utils")
 
 
-def load(data: str) -> dict[str, Any]:
+def load(data: str) -> CaseInsensitiveDict[CaseInsensitiveKey, Any]:
     """Deserialize INF-encoded `data`.
 
     INF is a text-based Setup Information format for Windows-based software
