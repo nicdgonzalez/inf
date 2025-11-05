@@ -21,13 +21,13 @@ class Document:
 
         return cls(sections=sections)
 
-    def as_dict(self) -> dict["CaseInsensitiveKey", Any]:
+    def as_dict(self) -> "CaseInsensitiveDict":
         # INF specification states:
         #
         # > Section names, entries, and directives are case-insensitive.
         #
         # <https://learn.microsoft.com/en-us/windows-hardware/drivers/install/general-syntax-rules-for-inf-files#-case-sensitivity>
-        d: CaseInsensitiveDict[CaseInsensitiveKey, Any] = CaseInsensitiveDict()
+        d = CaseInsensitiveDict()
 
         for section in self.sections:
             d[section.name] = CaseInsensitiveDict()

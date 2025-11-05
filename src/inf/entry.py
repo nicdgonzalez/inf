@@ -92,7 +92,10 @@ class Entry:
 
                     # Check before advancing to avoid advancing passed
                     # the newline on the last element of the array.
-                    if p.current.kind == TokenKind.COMMA:
+                    if (
+                        p.current is not None
+                        and p.current.kind == TokenKind.COMMA
+                    ):
                         p.advance()
 
                 return cls(key=None, value=value)

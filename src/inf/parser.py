@@ -1,10 +1,10 @@
-from typing import Iterable
+from typing import Iterator
 
 from .token import Token
 
 
 class Parser:
-    def __init__(self, tokens: Iterable[Token]) -> None:
+    def __init__(self, tokens: Iterator[Token]) -> None:
         self._tokens = tokens
         self._current: Token | None = None
         self._next: Token | None = None
