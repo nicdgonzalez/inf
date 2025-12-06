@@ -74,17 +74,6 @@ class LexerIterator:
 
         while self.index < len(self.input):
             c = self.input[self.index]
-            d = (
-                self.input[self.index + 1]
-                if self.index + 1 < len(self.input)
-                else None
-            )
-
-            if c == "\\" and d == '"':
-                literal += d
-                self.index += 2
-                continue
-
             self.index += 1
 
             if c == '"':

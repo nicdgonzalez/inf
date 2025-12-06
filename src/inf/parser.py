@@ -1,6 +1,9 @@
+import logging
 from typing import Iterator
 
 from .token import Token
+
+logger = logging.getLogger(__name__)
 
 
 class Parser:

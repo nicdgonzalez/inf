@@ -36,7 +36,7 @@ class Section:
         elif p.current.kind == TokenKind.LBRACKET:
             # Empty section -- no entries.
             return cls(name=name, entries=entries)
-        elif p.current.kind != TokenKind.IDENTIFIER:
+        elif p.current.kind not in (TokenKind.IDENTIFIER, TokenKind.STRING):
             raise RuntimeError(
                 f"expected IDENTIFIER, got {p.current.kind.name}"
             )

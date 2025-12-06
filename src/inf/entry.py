@@ -12,7 +12,9 @@ class Entry:
     @classmethod
     def parse(cls, p: Parser, /) -> "Entry":
         assert p.current is not None, "called parse after end of input"
-        assert p.current.kind == TokenKind.IDENTIFIER, p.current.kind.name
+        # fmt: off
+        assert p.current.kind in (TokenKind.IDENTIFIER, TokenKind.STRING), p.current.kind.name  # noqa: E501
+        # fmt: on
 
         key = p.current.literal
         p.advance()

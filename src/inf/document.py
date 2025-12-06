@@ -1,8 +1,11 @@
+import logging
 from typing import Any
 
 from .parser import Parser
 from .section import Section
 from .token import TokenKind
+
+logger = logging.getLogger(__name__)
 
 
 class Document:
