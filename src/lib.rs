@@ -7,130 +7,47 @@
     clippy::pedantic
 )]
 
+mod parser;
+
 use std::collections::HashMap;
-use std::{error, fmt};
+use std::iter::Peekable;
+use std::{char, error, fmt};
 
-/// Represents an entry in a [Section].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Entry {
-    /// Key-value pair
-    Item(String, Value),
-    /// Standalone value
-    Value(Value),
-}
-
-/// Represents a value in an [Entry].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Value {
-    /// String value
-    Raw(String),
-    /// Comma-separated list of values
-    List(Vec<String>),
-}
-
-// "setup information (INF) file"
-
-/// Implemented based on the rules in Microsoft's [General Syntax Rules for INF Files].
+/// Byte Order Mark (BOM) is used to signal the endianness of an encoding. The order `0xFF 0xFE`
+/// strongly suggests that the encoding is using little-endian byte order.
 ///
-/// [General Syntax Rules for INF Files]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/general-syntax-rules-for-inf-files
+/// <https://en.wikipedia.org/wiki/Byte_order_mark>
+const BOM_LE: &[u8] = &[0xFF, 0xFE];
+
 #[derive(Debug)]
 pub struct Inf {
-    // TODO: Section names are supposed to be case-insensitive.
-    // The HashMap and Key probably need custom hash implementations to abstract away this detail.
     sections: HashMap<String, Vec<Entry>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    Item(String, Value),
+    ValueOnly(Value),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    Raw(String),
+    List(Vec<String>),
+}
+
 impl Inf {
-    pub fn parse(mut buffer: &[u8]) -> Result<Self, ParserError> {
-        let mut sections = HashMap::<String, Vec<Entry>>::with_capacity(16);
+    pub fn parse(buffer: &[u8]) -> Result<Self, ParseError> {
+        let text = decode_data(buffer);
+        let mut chars = text.chars().peekable();
+        let mut sections = HashMap::<String, Vec<Entry>>::with_capacity(14);
 
-        while let Some((&b, data)) = buffer.split_first() {
-            if b.is_ascii_whitespace() {
-                buffer = data;
-                continue;
-            }
-
-            match b {
-                b';' => {
-                    // TODO: This was just for my own sanity during development; in the final
-                    // version, don't waste time keeping the comment, just return the `data`.
-                    let (comment, data) = parse_comment(buffer);
-                    println!("Comment: {:?}", String::from_utf8_lossy(comment));
-                    buffer = data;
-                }
-                b'[' => {
-                    // TODO: See if there is a performance gain if I first group each of
-                    // the sections into chunks, and then process them in parallel.
-                    let (section_name, data) = parse_section_name(buffer)?;
-                    buffer = data;
-                    println!("Section name: {:?}", String::from_utf8_lossy(section_name));
-
-                    // TODO: Parse entries
-                    //
-                    // If we go line by line, the line can:
-                    //
-                    // Note: It would be good to have unit tests for all of these cases.
-                    //
-                    // - be empty
-                    // - end with a `\`, making it a multiline value
-                    // - be a comment
-                    // - be `a \
-                    //       really \
-                    //       weird \
-                    //       key = value1,"PathValue\"\ ; with a comment
-                    //       ,value3`
-                    // - be `key = value`
-                    // - be `key = "value"`
-                    // - be `key=value`
-                    // - be `"value"`
-                    // - be `"value","value",,"value"`
-                    // - be `value,,,value,value`
-                    // - be `long value with spaces and no quotes`
-                    //
-                    // First, we should separate out the line (take a slice of start to newline) to
-                    // constrain our searches to within the currently-being-parsed line.
-                    //
-                    // Then, search within the sub-slice for an equal sign (=).
-                    //
-                    // If it is a quoted value, to escape a double quote ("), you need to use
-                    // two double quotes (e.g., `"Display an ""example"" string"` will become
-                    // `Display an "example" string`).
-                    //
-                    // ---
-                    //
-                    // Create sub-slice: start..newline.
-                    //
-                    // Create another sub-slice from start to `=`. If found, this becomes the key.
-                    // (Note: Keep in mind that the line can end with a backslash, making it a
-                    // multi-line key)
-                    //
-                    // For the value, search for commas.
-                    //
-                    // ---
-                    //
-                    // The maximum length of an INF file "field" is 4096 before string
-                    // substitution.
-                    //
-                    // The maximum length of an individual string *after* string substitution is
-                    // 4096.
-                    //
-                    // Allocate `n` threads, with pre-fixed buffers of 4096 for field and then
-                    // later for the expanded string value.
-
-                    // TODO: while !data.trim().starts_with(b'[') || EOF -> parse each entry
-                    let (entry, data) = parse_section_entry(buffer);
-                    buffer = data;
-                    println!("Entry: {entry:?}");
-
-                    // TODO:
-                    // check if sections[section_name] already exists
-                    //  if exists: get mut ref to existing -> extend existing
-                    //  else: insert new vec -> parse and insert entries
-                }
-                _ => {
-                    println!("No match: {}", char::from(b));
-                    buffer = data;
-                }
+        while let Some(c) = chars.next() {
+            match c {
+                ';' => skip_comment(&mut chars),
+                '[' => parse_section(&mut chars, &mut sections)?,
+                c if c.is_ascii_whitespace() => {}
+                c => unimplemented!("{c:?}"),
             }
         }
 
@@ -138,148 +55,159 @@ impl Inf {
     }
 }
 
-type Comment<'a> = &'a [u8];
-type Data<'a> = &'a [u8];
+// INF files must be saved with UTF-16 LE or ANSI file encoding.
+// <https://learn.microsoft.com/en-us/windows-hardware/drivers/display/general-unicode-requirement>
+fn decode_data(data: &[u8]) -> String {
+    if data.starts_with(BOM_LE) {
+        // Likely UTF-16 LE
+        let utf16 = data[2..]
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<u16>>();
 
-fn parse_comment(mut buffer: &[u8]) -> (Comment<'_>, Data<'_>) {
-    buffer = &buffer[1..]; // Skip the ';'
-
-    let start = buffer
-        .iter()
-        .position(|b| !b.is_ascii_whitespace())
-        .unwrap_or(0);
-    let stop = buffer
-        .iter()
-        .position(|&b| b == b'\n')
-        .unwrap_or(buffer.len());
-    let comment = &buffer[start..stop];
-
-    let data = if stop + 1 < buffer.len() {
-        &buffer[stop + 1..]
+        char::decode_utf16(utf16)
+            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect::<String>()
     } else {
-        &[]
-    };
-
-    (comment, data)
+        // Otherwise, assume ANSI, which is a subset of UTF-8.
+        String::from_utf8_lossy(data).to_string()
+    }
 }
 
-type SectionName<'a> = &'a [u8];
+fn skip_comment<C>(chars: &mut C)
+where
+    C: Iterator<Item = char>,
+{
+    _ = chars.find(|&c| c == '\n');
+}
 
-fn parse_section_name(mut buffer: &[u8]) -> Result<(SectionName<'_>, Data<'_>), ParserError> {
-    buffer = &buffer[1..]; // Skip the '['
+fn parse_section<C>(
+    chars: &mut Peekable<C>,
+    sections: &mut HashMap<String, Vec<Entry>>,
+) -> Result<(), ParseError>
+where
+    C: Iterator<Item = char>,
+{
+    let section_name = parse_section_name(chars)?;
+    let entries = sections
+        .entry(section_name)
+        .or_insert_with(|| Vec::with_capacity(32));
 
-    // TODO: Make sure chaining take_while and position together like this does what I expect it
-    // to do... which is to create a sub-slice until the newline, and find the closing bracket
-    // *within that sub-slice*.
-    let r_bracket = buffer
-        .iter()
-        .take_while(|&&b| b != b'\n')
-        .position(|&b| b == b']')
-        .ok_or(ParserError::InvalidSyntax)?;
-    let section_name = &buffer[..r_bracket];
+    // Parse each line until you reach a new section or EOF.
+    while chars.peek().is_some_and(|&c| c != '[') {
+        if let Some(line) = read_line(chars) {
+            let entry = parse_section_entry(&line);
+            entries.push(entry);
+        }
+    }
+
+    Ok(())
+}
+
+fn read_line<C>(chars: &mut Peekable<C>) -> Option<String>
+where
+    C: Iterator<Item = char>,
+{
+    let mut line = String::with_capacity(1024);
+    let mut within_quotes = false;
+
+    loop {
+        let mut current = chars
+            .by_ref()
+            .take_while(|&c| c != '\n')
+            .collect::<String>();
+
+        strip_inline_comment(&mut current, &mut within_quotes);
+
+        if !current.ends_with('\\') {
+            line.push_str(&current);
+            break;
+        }
+
+        line.push_str(current[..current.len() - 1].trim_end());
+    }
+
+    if line.is_empty() { None } else { Some(line) }
+}
+
+fn strip_inline_comment(line: &mut String, within_quotes: &mut bool) {
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => *within_quotes = !*within_quotes,
+            ';' if !*within_quotes => {
+                *line = line[..i].trim_end().to_owned();
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parse_section_name<C>(chars: &mut C) -> Result<String, ParseError>
+where
+    C: Iterator<Item = char>,
+{
+    let section_name = chars.by_ref().take_while(|&c| c != ']').collect::<String>();
 
     if section_name.is_empty() {
-        return Err(ParserError::SectionNameEmpty);
+        return Err(ParseError::SectionNameEmpty);
     } else if section_name.len() > 255 {
-        return Err(ParserError::SectionNameTooLong);
+        return Err(ParseError::SectionNameTooLong);
     }
 
-    let data = &buffer[r_bracket + 1..];
-
-    if !data
-        .iter()
-        .take_while(|&&b| b != b'\n')
-        .all(u8::is_ascii_whitespace)
-    {
-        return Err(ParserError::InvalidSyntax);
+    // Strip excess whitespace and comments.
+    while let Some(d) = chars.next() {
+        match d {
+            ';' => {
+                skip_comment(chars);
+                break; // Newline has already been consumed.
+            }
+            '\n' => break,
+            c if c.is_ascii_whitespace() => {}
+            _ => return Err(ParseError::Syntax),
+        }
     }
 
-    Ok((section_name, data))
+    Ok(section_name)
 }
 
-// TODO: Return an Entry instead of raw bytes.
-fn parse_section_entry(mut buffer: &[u8]) -> (Entry, &[u8]) {
-    let mut chunk = Vec::<u8>::with_capacity(4096);
+fn parse_section_entry(line: &str) -> Entry {
+    // TODO: To escape quotes, layer the double quotes (e.g., "This is an ""example"" value").
 
-    // TODO: Create helper function to read one line at a time.
-    let newline = buffer
-        .iter()
-        .position(|&b| b == b'\n')
-        .unwrap_or(buffer.len());
-    let mut current_line = &buffer[..newline];
-    println!("Current line: {:?}", String::from_utf8_lossy(current_line));
+    // TODO: Track whether the equal sign is within quotes or not.
 
-    buffer = if newline + 1 < buffer.len() {
-        &buffer[newline + 1..]
+    if let Some(equal) = line.chars().position(|c| c == '=') {
+        let key = line[..equal].trim().to_owned();
+        let value = line[equal + 1..].trim().to_owned();
+        // TODO: Process values
+        Entry::Item(key, Value::Raw(value))
     } else {
-        &[]
-    };
-
-    // Concatenate current line + next line if line ends with a backslash.
-    while current_line.ends_with(b"\\") {
-        chunk.extend(&current_line[..current_line.len() - 1]);
-
-        let newline = buffer
-            .iter()
-            .position(|&b| b == b'\n')
-            .unwrap_or(buffer.len());
-        current_line = &buffer[..newline];
-
-        buffer = if newline + 1 < buffer.len() {
-            &buffer[newline + 1..]
-        } else {
-            &[]
-        };
+        let value = line.trim().to_owned();
+        // TODO: Process values
+        Entry::ValueOnly(Value::Raw(value))
     }
-
-    chunk.extend(current_line);
-    println!("Chunk: {:?}", String::from_utf8_lossy(chunk.as_slice()));
-
-    let entry = if chunk.contains(&b'=') {
-        let equal = chunk.iter().position(|&b| b == b'=').unwrap();
-        let key = &chunk[..equal];
-        let value = &chunk[equal + 1..];
-
-        Entry::Item(
-            String::from_utf8_lossy(key).to_string(),
-            Value::Raw(
-                String::from_utf8_lossy(value)
-                    .trim()
-                    .trim_matches('"')
-                    .to_string(),
-            ),
-        )
-    } else {
-        Entry::Value(Value::Raw(
-            String::from_utf8_lossy(chunk.as_slice())
-                .trim()
-                .trim_matches('"')
-                .to_string(),
-        ))
-    };
-
-    (entry, buffer)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParserError {
+pub enum ParseError {
+    ReadFailed,
+    Syntax,
     SectionNameEmpty,
     SectionNameTooLong,
-    InvalidSyntax,
 }
 
-impl error::Error for ParserError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for ParseError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         None
     }
 }
 
-impl fmt::Display for ParserError {
+impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            Self::Syntax => "invalid syntax".fmt(f),
             Self::SectionNameEmpty => "section name cannot be empty".fmt(f),
-            Self::SectionNameTooLong => "section name exceeds 255 character limit".fmt(f),
-            Self::InvalidSyntax => "invalid syntax".fmt(f),
+            Self::SectionNameTooLong => "section name cannot exceed 255 characters".fmt(f),
         }
     }
 }
@@ -289,127 +217,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn comment_before_sections() {
-        let buffer = b"; Hello, World!\n\n[Version]";
+    fn multiline_value_with_inline_comment() {
+        let buffer = br#"
+; This is a comment
+
+[Section]
+key = value1,"value2;not-a-comment"\ ; This is an inline comment.
+,value3,,value5
+"#;
+
+        let inf = Inf::parse(buffer).expect("failed to parse hardcoded INF file");
 
         assert_eq!(
-            parse_comment(buffer.as_slice()),
-            (b"Hello, World!".as_slice(), b"\n[Version]".as_slice())
+            inf.sections.get("Section"),
+            Some(&vec![Entry::Item(
+                "key".to_owned(),
+                Value::Raw("value1,\"value2;not-a-comment\",value3,,value5".to_owned())
+            )])
         );
     }
 
     #[test]
-    fn comment() {
-        let buffer = b"; This is a comment.";
+    fn multiple_keys_and_values() {
+        let buffer = br"
+[Section]
+key1 = value1
+key2 = value2
+key3 = value3
+";
+
+        let inf = Inf::parse(buffer).expect("failed to parse hardcoded INF file");
 
         assert_eq!(
-            parse_comment(buffer),
-            (b"This is a comment.".as_slice(), b"".as_slice())
-        );
-    }
-
-    #[test]
-    fn section_name() {
-        let buffer = b"[Version]";
-
-        assert_eq!(
-            parse_section_name(buffer).expect("failed to parse hardcoded section name"),
-            (b"Version".as_slice(), b"".as_slice())
-        );
-    }
-
-    #[test]
-    fn section_name_double_closing_bracket() {
-        let buffer = b"[Version]]";
-
-        assert_eq!(parse_section_name(buffer), Err(ParserError::InvalidSyntax));
-    }
-
-    #[test]
-    fn section_name_valid_quoted() {
-        let buffer = b"[;; Std.Mfg ]";
-
-        assert_eq!(
-            parse_section_name(buffer).expect("failed to parse hardcoded section name"),
-            (b";; Std.Mfg ".as_slice(), b"".as_slice())
-        );
-    }
-
-    #[test]
-    fn section_name_trailing_whitespace() {
-        let buffer = b"[Version]     ";
-
-        assert_eq!(
-            parse_section_name(buffer).expect("failed to parse hardcoded section name"),
-            (b"Version".as_slice(), b"     ".as_slice())
-        );
-    }
-
-    #[test]
-    fn section_name_newline_in_middle() {
-        let buffer = b"[Vers\nion]";
-
-        assert_eq!(parse_section_name(buffer), Err(ParserError::InvalidSyntax));
-    }
-
-    #[test]
-    fn section_name_empty() {
-        // Note: I'm not sure if this is actually disallowed, but I'm disallowing is just in case.
-        let buffer = b"[]";
-
-        assert_eq!(
-            parse_section_name(buffer),
-            Err(ParserError::SectionNameEmpty)
+            inf.sections.get("Section"),
+            Some(&vec![
+                Entry::Item("key1".to_owned(), Value::Raw("value1".to_owned())),
+                Entry::Item("key2".to_owned(), Value::Raw("value2".to_owned())),
+                Entry::Item("key3".to_owned(), Value::Raw("value3".to_owned())),
+            ])
         );
     }
 
     #[test]
     fn multiple_sections() {
-        let buffer = b"\
-            [Version]\n\
-            Signature=\"$CHICAGO$\"\n\
-            \n\
-            [DefaultInstall]\
-        ";
+        let buffer = br#"
+[Version] ; This section is typically required.
+Signature = "$CHICAGO$"
+
+[Section]
+key = value
+"#;
+
+        let inf = Inf::parse(buffer).expect("failed to parse hardcoded INF file");
 
         assert_eq!(
-            parse_section_name(buffer),
-            Ok((
-                b"Version".as_slice(),
-                b"\nSignature=\"$CHICAGO$\"\n\n[DefaultInstall]".as_slice()
-            ))
+            inf.sections.get("Version"),
+            Some(&vec![Entry::Item(
+                "Signature".to_owned(),
+                Value::Raw("$CHICAGO$".to_owned())
+            ),])
+        );
+        assert_eq!(
+            inf.sections.get("Section"),
+            Some(&vec![Entry::Item(
+                "key".to_owned(),
+                Value::Raw("value".to_owned())
+            ),])
         );
     }
 
     #[test]
-    fn section_entry() {
-        let buffer = b"Signature=\"$CHICAGO$\"";
-        let (entry, data) = parse_section_entry(buffer);
+    fn quoted_value_with_equal() {
+        let buffer = br#"
+[Section]
+"1+1=2"
+"#;
+
+        let inf = Inf::parse(buffer).expect("failed to parse hardcoded INF file");
 
         assert_eq!(
-            entry,
-            Entry::Item("Signature".to_owned(), Value::Raw("$CHICAGO$".to_owned()))
+            inf.sections.get("Section"),
+            Some(&vec![Entry::ValueOnly(Value::Raw("1+1=2".to_owned()))])
         );
-        assert_eq!(data, b"");
     }
-
-    #[test]
-    fn section_entry_multiline() {
-        let buffer = b"Signature=\\\n\"$CHICAGO$\"";
-        let (entry, data) = parse_section_entry(buffer);
-
-        assert_eq!(
-            entry,
-            Entry::Item("Signature".to_owned(), Value::Raw("$CHICAGO$".to_owned()))
-        );
-        assert_eq!(data, b"");
-    }
-
-    // test multi-line value with comment in the middle
-    //
-    // ```inf
-    // [SectionName]
-    // key = value1,"Value2\"\ ; example comment
-    // ,value3,,
-    // ```
 }
