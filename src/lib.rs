@@ -8,14 +8,16 @@
 )]
 
 mod error;
+mod parser;
 mod section;
 
 use std::char;
 use std::io::Read;
-use std::iter::Peekable;
 
 pub use error::ParseError;
 pub use section::{Entry, Section, Value};
+
+use crate::parser::Parser;
 
 /// The Byte Order Mark (BOM) is used to signal the endianness of an encoding.
 /// The order `FF FE` strongly suggests that the data is encoded using little-endian byte order.
@@ -57,16 +59,8 @@ impl TryFrom<&[u8]> for Inf {
 
     fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
         let text = decode_data(data);
-        let mut chars = text.chars().peekable();
-        let mut sections = Vec::<Section>::with_capacity(16);
-
-        while let Some(c) = chars.next() {
-            match c {
-                ';' => skip_comment(&mut chars),
-                '[' => parse_section(&mut chars, &mut sections)?,
-                _ => {}
-            }
-        }
+        let parser = Parser::new(&text);
+        let sections = parser.into_sections()?;
 
         Ok(Self { sections })
     }
@@ -91,216 +85,241 @@ fn decode_data(data: &[u8]) -> String {
     }
 }
 
-fn skip_comment<C>(chars: &mut C)
-where
-    C: Iterator<Item = char>,
-{
-    _ = chars.find(|&c| c == '\n');
-}
-
-fn parse_section<C>(chars: &mut Peekable<C>, sections: &mut Vec<Section>) -> Result<(), ParseError>
-where
-    C: Iterator<Item = char>,
-{
-    let section_name = parse_section_name(chars)?;
-
-    // Duplicate section names are allowed; the specification states we should merge their entries.
-    let entries = if let Some(i) = sections
-        .iter()
-        .position(|section| section_name == section.name())
-    {
-        // If a section with the same name already exists, extend it.
-        sections.get_mut(i).unwrap()
-    } else {
-        // Otherwise, create a new section.
-        sections.push(Section::new(section_name, Vec::with_capacity(32)));
-        sections.last_mut().unwrap()
-    };
-
-    while chars.peek().is_some_and(|&c| c != '[') {
-        if let Some(line) = get_next_entry(chars)? {
-            let entry = parse_section_entry(&line)?;
-            entries.push(entry);
-        }
-    }
-
-    Ok(())
-}
-
-fn parse_section_name<C>(chars: &mut Peekable<C>) -> Result<String, ParseError>
-where
-    C: Iterator<Item = char>,
-{
-    let section_name = chars.take_while(|&c| c != ']').collect::<String>();
-
-    if section_name.is_empty() {
-        return Err(ParseError::SectionNameEmpty);
-    } else if section_name.len() > 255 {
-        return Err(ParseError::SectionNameTooLong);
-    }
-
-    // Strip excess whitespace and inline comments; break the loop after consuming the newline.
-    while let Some(c) = chars.next() {
-        match c {
-            ';' => {
-                skip_comment(chars);
-                break;
-            }
-            '\n' => break, // Will consume any Carriage Returns (\r) also.
-            c if c.is_ascii_whitespace() => {
-                assert_ne!(c, '\n', r"\n should have been handled separately");
-            }
-            c => return Err(ParseError::UnexpectedCharacter { c }),
-        }
-    }
-
-    Ok(section_name)
-}
-
-/// Reads the next entry while stripping Line Continuators (\) and inline comments to return
-/// a single, uninterrupted line.
-fn get_next_entry<C>(chars: &mut Peekable<C>) -> Result<Option<String>, ParseError>
-where
-    C: Iterator<Item = char>,
-{
-    let mut line = String::with_capacity(4096);
-    let mut within_quotes = false;
-
-    loop {
-        let current = chars.take_while(|&c| c != '\n').collect::<String>();
-        let mut current = current
-            .strip_suffix('\r')
-            .unwrap_or(current.as_str())
-            .trim_end();
-
-        // Strip inline comments.
-        for (i, c) in current.char_indices() {
-            match c {
-                '"' => within_quotes = !within_quotes,
-                ';' if !within_quotes => {
-                    current = current[..i].trim_end();
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        if within_quotes {
-            return Err(ParseError::UnterminatedString);
-        }
-
-        // If the line ends with a Line Continuator, strip it and continue to next line.
-        if let Some(s) = current.strip_suffix('\\') {
-            line.push_str(s);
-            continue;
-        }
-
-        line.push_str(current);
-        break;
-    }
-
-    if line.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(line))
-    }
-}
-
-fn parse_section_entry(line: &str) -> Result<Entry, ParseError> {
-    assert!(!line.is_empty());
-    assert!(!line.ends_with('\\'));
-    assert!(!line.contains('\r'));
-    assert!(!line.contains('\n'));
-
-    let mut values = Vec::<String>::new();
-    let mut within_quotes = false;
-    let mut key = None::<String>;
-    let mut start = 0;
-
-    for (i, c) in line.char_indices().skip(1) {
-        match c {
-            '"' => within_quotes = !within_quotes,
-            ',' if !within_quotes => {
-                if key.is_some() {
-                    assert_ne!(start, 0, "expected start to be after the equal sign");
-                }
-
-                let value = normalize_value(&line[start..i])?;
-                values.push(value);
-                start = i + 1;
-            }
-            '=' if !within_quotes => {
-                if !values.is_empty() {
-                    // I'm not sure if unquoted equal signs should be allowed, but since it's not
-                    // mentioned anywhere in the specification, we'll assume it is for now.
-                    continue;
-                }
-
-                key = Some(line[start..i].trim().to_owned());
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-
-    // Normalize the final value
-    let last = normalize_value(line[start..].trim())?;
-    values.push(last);
-
-    let value = if values.len() == 1 {
-        values.remove(0).into()
-    } else {
-        values.into()
-    };
-
-    Ok(if let Some(k) = key {
-        Entry::Item(k, value)
-    } else {
-        Entry::ValueOnly(value)
-    })
-}
-
-fn normalize_value(mut value: &str) -> Result<String, ParseError> {
-    value = value.trim();
-    value = match (value.starts_with('"'), value.ends_with('"')) {
-        (true, true) => &value[1..value.len() - 1],
-        (false, false) => value,
-        // TODO: I feel like we should already know this based on previous `within_quotes` check.
-        _ => return Err(ParseError::UnterminatedString),
-    };
-    let value = value.replace("\"\"", "\"").replace("\\\\", "\\");
-
-    // Note: We do not un-escape percent signs here since it will become ambiguous later whether
-    // they were supposed to be for string substitution or simply escaped percent signs.
-
-    Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn hoshimachi_inf() {
-        // Uses quotes strings in section entries.
-        let buffer = include_bytes!("../Hoshimachi.inf");
-        let inf = Inf::from_bytes(buffer).expect("failed to parse Hoshimachi.inf");
-        dbg!(&inf.sections);
+    fn multiline_value_with_inline_comments() {
+        let buffer = b"\
+            [Section]\n\
+            key = value1,\"value2;not-a-comment\"\\ ; This is an inline comment.\n\
+            ,value3,,value5
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![Entry::Item(
+                    "key".to_owned(),
+                    Value::List(vec![
+                        "value1".to_owned(),
+                        "value2;not-a-comment".to_owned(),
+                        "value3".to_owned(),
+                        String::new(),
+                        "value5".to_owned()
+                    ]),
+                )]
+            )]
+        );
     }
 
     #[test]
-    fn novella_inf() {
-        // Uses Windows' CRLF
-        let buffer = include_bytes!("../Novella.inf");
-        let inf = Inf::from_bytes(buffer).expect("failed to parse Novella.inf");
-        dbg!(&inf.sections);
+    fn lines_end_with_crlf() {
+        let buffer = b"\
+            [Version] ; This section is required\r\n\
+            signature = \"$CHICAGO$\"\r\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Version".to_owned(),
+                vec![Entry::Item(
+                    "signature".to_owned(),
+                    Value::Raw("$CHICAGO$".to_owned())
+                )]
+            )]
+        );
     }
 
     #[test]
-    fn hornet_inf() {
-        // Uses unquotes strings in section entries.
-        let buffer = include_bytes!("../Hornet.inf");
-        let inf = Inf::from_bytes(buffer).expect("failed to parse Hornet.inf");
-        dbg!(&inf.sections);
+    fn multiple_sections() {
+        let buffer = b"\
+            [Section1]\n\
+            [Section2]\n\
+            [Section3]\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            vec![
+                Section::new("Section1".to_owned(), vec![]),
+                Section::new("Section2".to_owned(), vec![]),
+                Section::new("Section3".to_owned(), vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn multiple_entries() {
+        let buffer = b"\
+            [Section]\n\
+            key1 = value1\n\
+            key2 = value2\n\
+            key3 = value3\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![
+                    Entry::Item("key1".to_owned(), Value::Raw("value1".to_owned())),
+                    Entry::Item("key2".to_owned(), Value::Raw("value2".to_owned())),
+                    Entry::Item("key3".to_owned(), Value::Raw("value3".to_owned())),
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn mixed_entry_kinds() {
+        let buffer = b"\
+            [Section]\n\
+            value\n\
+            \"value1\",value2,,\"value4\\\"\n\
+            key = value\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![
+                    Entry::ValueOnly(Value::Raw("value".to_owned())),
+                    Entry::ValueOnly(Value::List(vec![
+                        "value1".to_owned(),
+                        "value2".to_owned(),
+                        String::new(),
+                        "value4\\".to_owned()
+                    ])),
+                    Entry::Item("key".to_owned(), Value::Raw("value".to_owned())),
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn item_value_quoted() {
+        let buffer = b"\
+            [Section]\n\
+            key = \"value\"\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![Entry::Item(
+                    "key".to_owned(),
+                    Value::Raw("value".to_owned())
+                )]
+            )]
+        );
+    }
+
+    #[test]
+    fn item_value_unquoted() {
+        let buffer = b"\
+            [Section]\n\
+            key = value\n\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![Entry::Item(
+                    "key".to_owned(),
+                    Value::Raw("value".to_owned())
+                )]
+            )]
+        );
+    }
+
+    #[test]
+    fn item_value_unquoted_with_spaces() {
+        let buffer = b"\
+            [Section]\n\
+            key = unquoted value with spaces\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![Entry::Item(
+                    "key".to_owned(),
+                    Value::Raw("unquoted value with spaces".to_owned())
+                )]
+            )]
+        );
+    }
+
+    #[test]
+    fn item_value_quoted_with_leading_spaces() {
+        let buffer = b"\
+            [Section]\n\
+            key = \"    with 4 leading spaces\"\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![Entry::Item(
+                    "key".to_owned(),
+                    Value::Raw("    with 4 leading spaces".to_owned())
+                )]
+            )]
+        );
+    }
+
+    #[test]
+    fn item_value_quoted_with_trailing_spaces() {
+        let buffer = b"\
+            [Section]\n\
+            key = \"with 5 trailing spaces     \"\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![Entry::Item(
+                    "key".to_owned(),
+                    Value::Raw("with 5 trailing spaces     ".to_owned())
+                )]
+            )]
+        );
+    }
+
+    #[test]
+    fn item_value_quoted_with_equal_sign() {
+        let buffer = b"\
+            [Section]\n\
+            \"1+1=2\"
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![Entry::ValueOnly(Value::Raw("1+1=2".to_owned()))]
+            )]
+        );
     }
 }
