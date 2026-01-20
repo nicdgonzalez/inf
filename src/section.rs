@@ -25,14 +25,12 @@ impl Section {
     }
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     Item(String, Value),
     ValueOnly(Value),
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Raw(String),

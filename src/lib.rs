@@ -322,4 +322,25 @@ mod tests {
             )]
         );
     }
+
+    #[test]
+    fn starts_with_a_comment() {
+        let buffer = b"\
+            ; This is a comment!\r\n\
+            [Section]\r\n\
+            key = value\
+        ";
+        let inf = Inf::from_bytes(buffer).expect("failed to parse hardcoded INF file");
+
+        assert_eq!(
+            inf.sections(),
+            &vec![Section::new(
+                "Section".to_owned(),
+                vec![Entry::Item(
+                    "key".to_owned(),
+                    Value::Raw("value".to_owned())
+                )]
+            )]
+        );
+    }
 }
