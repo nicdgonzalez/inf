@@ -7,60 +7,64 @@
     clippy::pedantic
 )]
 
-use std::collections::HashMap;
-use std::iter::Peekable;
-use std::{char, error, fmt};
+mod error;
+mod section;
 
-/// Byte Order Mark (BOM) is used to signal the endianness of an encoding. The order `0xFF 0xFE`
-/// strongly suggests that the encoding is using little-endian byte order.
+use std::char;
+use std::io::Read;
+use std::iter::Peekable;
+
+pub use error::ParseError;
+pub use section::{Entry, Section, Value};
+
+/// The Byte Order Mark (BOM) is used to signal the endianness of an encoding.
+/// The order `FF FE` strongly suggests that the data is encoded using little-endian byte order.
 ///
 /// <https://en.wikipedia.org/wiki/Byte_order_mark>
-const BOM_LE: &[u8] = &[0xFF, 0xFE];
+const BOM_LE: [u8; 2] = [0xFF, 0xFE];
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Inf {
-    pub sections: HashMap<String, Vec<Entry>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Entry {
-    Item(String, Value),
-    ValueOnly(Value),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Value {
-    Raw(String),
-    List(Vec<String>),
+    // Using `Vec` instead of `HashMap` to preserve ordering.
+    sections: Vec<Section>,
 }
 
 impl Inf {
-    pub fn parse(buffer: &[u8]) -> Result<Self, ParseError> {
-        let text = decode_data(buffer);
-        let mut chars = text.chars().peekable();
-        let mut sections = HashMap::<String, Vec<Entry>>::with_capacity(14);
+    pub fn from_reader<R>(reader: &mut R) -> Result<Self, ParseError>
+    where
+        R: Read,
+    {
+        let mut buffer = Vec::new();
+        reader
+            .read_to_end(&mut buffer)
+            .map_err(|err| ParseError::ReadFailure { source: err })?;
 
-        // TODO: Parse the [Strings[.*]] section first, and do string substitution while parsing
-        // entries.
-        //
-        // Or, clarify that string substitution has not occurred yet, and provide a helper util
-        // expand() function or something.
-        //
-        // Experiment with splitting the text into chunks at each section (adds way more complexity)
-        // -> text.find("[Strings")
-        //
-        // The Strings section is more complex than it seems, so make sure to read this while
-        // implementing it:
-        //
-        // https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-strings-section
+        Self::try_from(buffer.as_slice())
+    }
+
+    pub fn from_bytes(buffer: &[u8]) -> Result<Self, ParseError> {
+        Self::try_from(buffer)
+    }
+
+    #[must_use]
+    pub fn sections(&self) -> &[Section] {
+        &self.sections
+    }
+}
+
+impl TryFrom<&[u8]> for Inf {
+    type Error = ParseError;
+
+    fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
+        let text = decode_data(data);
+        let mut chars = text.chars().peekable();
+        let mut sections = Vec::<Section>::with_capacity(16);
+
         while let Some(c) = chars.next() {
             match c {
                 ';' => skip_comment(&mut chars),
                 '[' => parse_section(&mut chars, &mut sections)?,
-                // TODO: Handle CRLF, not only LF. Some sections appear as Raw("") because CR does
-                // not count as the LF.
-                c if c.is_ascii_whitespace() => {}
-                c => return Err(ParseError::Syntax { character: c }),
+                _ => {}
             }
         }
 
@@ -68,12 +72,13 @@ impl Inf {
     }
 }
 
-// INF files must be saved with UTF-16 LE or ANSI file encoding.
-// <https://learn.microsoft.com/en-us/windows-hardware/drivers/display/general-unicode-requirement>
+/// Converts a slice of bytes into a UTF-8 string that we can iterate over.
 fn decode_data(data: &[u8]) -> String {
-    if data.starts_with(BOM_LE) {
-        // Likely UTF-16 LE
-        let utf16 = data[2..]
+    // INF files must be saved with UTF-16 LE or ANSI file encodings. Because ANSI is a subset
+    // of UTF-8 and endianness is irrelevant to UTF-8, the BOM being present strongly suggests
+    // that the data was encoded with UTF-16 LE.
+    if data.starts_with(&BOM_LE) {
+        let utf16 = data[BOM_LE.len()..]
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<u16>>();
@@ -82,7 +87,6 @@ fn decode_data(data: &[u8]) -> String {
             .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
             .collect::<String>()
     } else {
-        // Otherwise, assume ANSI, which is a subset of UTF-8.
         String::from_utf8_lossy(data).to_string()
     }
 }
@@ -94,73 +98,40 @@ where
     _ = chars.find(|&c| c == '\n');
 }
 
-fn parse_section<C>(
-    chars: &mut Peekable<C>,
-    sections: &mut HashMap<String, Vec<Entry>>,
-) -> Result<(), ParseError>
+fn parse_section<C>(chars: &mut Peekable<C>, sections: &mut Vec<Section>) -> Result<(), ParseError>
 where
     C: Iterator<Item = char>,
 {
     let section_name = parse_section_name(chars)?;
-    let entries = sections
-        .entry(section_name)
-        .or_insert_with(|| Vec::with_capacity(32));
 
-    // Parse each line until you reach a new section or EOF.
+    // Duplicate section names are allowed; the specification states we should merge their entries.
+    let entries = if let Some(i) = sections
+        .iter()
+        .position(|section| section_name == section.name())
+    {
+        // If a section with the same name already exists, extend it.
+        sections.get_mut(i).unwrap()
+    } else {
+        // Otherwise, create a new section.
+        sections.push(Section::new(section_name, Vec::with_capacity(32)));
+        sections.last_mut().unwrap()
+    };
+
     while chars.peek().is_some_and(|&c| c != '[') {
-        if let Some(line) = read_line(chars) {
-            let entry = parse_section_entry(&line);
-            entries.push(entry?);
+        if let Some(line) = get_next_entry(chars)? {
+            let entry = parse_section_entry(&line)?;
+            entries.push(entry);
         }
     }
 
     Ok(())
 }
 
-fn read_line<C>(chars: &mut Peekable<C>) -> Option<String>
+fn parse_section_name<C>(chars: &mut Peekable<C>) -> Result<String, ParseError>
 where
     C: Iterator<Item = char>,
 {
-    let mut line = String::with_capacity(1024);
-    let mut within_quotes = false;
-
-    loop {
-        let mut current = chars
-            .by_ref()
-            .take_while(|&c| c != '\n')
-            .collect::<String>();
-
-        strip_inline_comment(&mut current, &mut within_quotes);
-
-        if !current.ends_with('\\') {
-            line.push_str(&current);
-            break;
-        }
-
-        line.push_str(current[..current.len() - 1].trim_end());
-    }
-
-    if line.is_empty() { None } else { Some(line) }
-}
-
-fn strip_inline_comment(line: &mut String, within_quotes: &mut bool) {
-    for (i, c) in line.char_indices() {
-        match c {
-            '"' => *within_quotes = !*within_quotes,
-            ';' if !*within_quotes => {
-                *line = line[..i].trim_end().to_owned();
-                break;
-            }
-            _ => {}
-        }
-    }
-}
-
-fn parse_section_name<C>(chars: &mut C) -> Result<String, ParseError>
-where
-    C: Iterator<Item = char>,
-{
-    let section_name = chars.by_ref().take_while(|&c| c != ']').collect::<String>();
+    let section_name = chars.take_while(|&c| c != ']').collect::<String>();
 
     if section_name.is_empty() {
         return Err(ParseError::SectionNameEmpty);
@@ -168,199 +139,141 @@ where
         return Err(ParseError::SectionNameTooLong);
     }
 
-    // Strip excess whitespace and comments; break the loop after consuming the newline.
-    while let Some(d) = chars.next() {
-        match d {
+    // Strip excess whitespace and inline comments; break the loop after consuming the newline.
+    while let Some(c) = chars.next() {
+        match c {
             ';' => {
                 skip_comment(chars);
                 break;
             }
-            '\n' => break,
+            '\n' => break, // Will consume any Carriage Returns (\r) also.
             c if c.is_ascii_whitespace() => {
-                assert!(c != '\n', "newline should have been handled separately");
+                assert_ne!(c, '\n', r"\n should have been handled separately");
             }
-            c => return Err(ParseError::Syntax { character: c }),
+            c => return Err(ParseError::UnexpectedCharacter { c }),
         }
     }
 
     Ok(section_name)
 }
 
-fn parse_section_entry(line: &str) -> Result<Entry, ParseError> {
-    // TODO: There has to be a better way to ensure these things are true.
-    assert!(!line.is_empty());
-    assert!(!line.ends_with('\\'));
-    assert!(!line.contains('\n'));
+/// Reads the next entry while stripping Line Continuators (\) and inline comments to return
+/// a single, uninterrupted line.
+fn get_next_entry<C>(chars: &mut Peekable<C>) -> Result<Option<String>, ParseError>
+where
+    C: Iterator<Item = char>,
+{
+    let mut line = String::with_capacity(4096);
+    let mut within_quotes = false;
 
-    if line.starts_with('"') {
-        let mut values = Vec::<String>::new();
-        let mut within_quotes = true;
-        let mut start = 0usize;
+    loop {
+        let current = chars.take_while(|&c| c != '\n').collect::<String>();
+        let mut current = current
+            .strip_suffix('\r')
+            .unwrap_or(current.as_str())
+            .trim_end();
 
-        // Split at commas
-        for (i, c) in line.trim().char_indices().skip(1) {
+        // Strip inline comments.
+        for (i, c) in current.char_indices() {
             match c {
                 '"' => within_quotes = !within_quotes,
-                ',' if !within_quotes => {
-                    let value = &line[start..i];
-                    let value = match (value.starts_with('"'), value.ends_with('"')) {
-                        (true, true) => &value[1..value.len() - 1],
-                        (false, false) => value,
-                        // TODO: Ensure that every string contains an opening AND closing double quote.
-                        // TODO: Either properly test this, or remove this error.
-                        _ => {
-                            println!("Debug: {value:?}");
-                            return Err(ParseError::UnclosedString);
-                        }
-                    };
-                    let value = value.replace("\"\"", "\"");
-                    let value = value.replace("\\\\", "\\");
-                    // TODO: If I collapse the double percent signs now, it will be ambiguous
-                    // whether it is supposed to be string subsitution or an escaped percent sign.
-                    // let value = value.replace("%%", "%");
-                    values.push(value);
-                    start = i + 1;
+                ';' if !within_quotes => {
+                    current = current[..i].trim_end();
+                    break;
                 }
                 _ => {}
             }
         }
 
-        // TODO: Process the value.
-        let value = line[start..].trim();
-        let value = match (value.starts_with('"'), value.ends_with('"')) {
-            (true, true) => value[1..value.len() - 1].trim(),
-            // TODO: Ensure that every string contains an opening AND closing double quote.
-            // TODO: Either properly test this, or remove this error.
-            (false, false) => value,
-            _ => {
-                println!("Debug: {value:?}");
-                return Err(ParseError::UnclosedString);
-            }
-        };
-        let value = value.replace("\"\"", "\"");
-        let value = value.replace("\\\\", "\\");
-        // TODO: If I collapse the double percent signs now, it will be ambiguous
-        // whether it is supposed to be string subsitution or an escaped percent sign.
-        // let value = value.replace("%%", "%");
-        values.push(value);
-        println!("{values:#?}");
-
-        if values.len() > 1 {
-            return Ok(Entry::ValueOnly(Value::List(values)));
-        } else if let Some(value) = values.first() {
-            return Ok(Entry::ValueOnly(Value::Raw(value.to_owned())));
+        if within_quotes {
+            return Err(ParseError::UnterminatedString);
         }
+
+        // If the line ends with a Line Continuator, strip it and continue to next line.
+        if let Some(s) = current.strip_suffix('\\') {
+            line.push_str(s);
+            continue;
+        }
+
+        line.push_str(current);
+        break;
     }
 
-    let mut within_quotes = false;
-    let mut values = Vec::<String>::new();
-    let mut key = None::<String>;
-    let mut start = 0usize;
+    if line.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(line))
+    }
+}
 
-    for (i, c) in line.char_indices() {
+fn parse_section_entry(line: &str) -> Result<Entry, ParseError> {
+    assert!(!line.is_empty());
+    assert!(!line.ends_with('\\'));
+    assert!(!line.contains('\r'));
+    assert!(!line.contains('\n'));
+
+    let mut values = Vec::<String>::new();
+    let mut within_quotes = false;
+    let mut key = None::<String>;
+    let mut start = 0;
+
+    for (i, c) in line.char_indices().skip(1) {
         match c {
             '"' => within_quotes = !within_quotes,
             ',' if !within_quotes => {
                 if key.is_some() {
-                    assert_ne!(start, 0);
+                    assert_ne!(start, 0, "expected start to be after the equal sign");
                 }
 
-                // Process value
-                let value = line[start..i].trim();
-                let value = match (value.starts_with('"'), value.ends_with('"')) {
-                    (true, true) => value[1..value.len() - 1].trim(),
-                    (false, false) => value,
-                    // TODO: Ensure that every string contains an opening AND closing double quote.
-                    // TODO: Either properly test this, or remove this error.
-                    _ => {
-                        println!("Debug: {value:?}");
-                        return Err(ParseError::UnclosedString);
-                    }
-                };
-                let value = value.replace("\"\"", "\"");
-                let value = value.replace("\\\\", "\\");
-                // TODO: If I collapse the double percent signs now, it will be ambiguous
-                // whether it is supposed to be string subsitution or an escaped percent sign.
-                // let value = value.replace("%%", "%");
+                let value = normalize_value(&line[start..i])?;
                 values.push(value);
-                // TODO: Do I need to handle if this is the end of the line?
-                //  value1,value2,,
                 start = i + 1;
             }
             '=' if !within_quotes => {
                 if !values.is_empty() {
-                    // NOTE: I am unsure whether this should be allowed or not: `"1+1=2",==,value3`
+                    // I'm not sure if unquoted equal signs should be allowed, but since it's not
+                    // mentioned anywhere in the specification, we'll assume it is for now.
                     continue;
                 }
-                key = Some(line[..i].trim().to_owned());
+
+                key = Some(line[start..i].trim().to_owned());
                 start = i + 1;
             }
             _ => {}
         }
     }
 
-    // TODO: Process the value.
-    let value = line[start..].trim();
-    let value = match (value.starts_with('"'), value.ends_with('"')) {
-        (true, true) => value[1..value.len() - 1].trim(),
-        // TODO: Ensure that every string contains an opening AND closing double quote.
-        // TODO: Either properly test this, or remove this error.
-        (false, false) => value,
-        _ => {
-            println!("Debug: {value:?}");
-            return Err(ParseError::UnclosedString);
-        }
-    };
-    let value = value.replace("\"\"", "\"");
-    let value = value.replace("\\\\", "\\");
-    // TODO: If I collapse the double percent signs now, it will be ambiguous
-    // whether it is supposed to be string subsitution or an escaped percent sign.
-    // let value = value.replace("%%", "%");
-    values.push(value);
-    println!("Entries: {values:#?}");
-
-    assert!(!values.is_empty());
+    // Normalize the final value
+    let last = normalize_value(line[start..].trim())?;
+    values.push(last);
 
     let value = if values.len() == 1 {
-        Value::Raw(values.remove(0))
+        values.remove(0).into()
     } else {
-        Value::List(values)
+        values.into()
     };
 
-    Ok(if let Some(key) = key {
-        Entry::Item(key, value)
+    Ok(if let Some(k) = key {
+        Entry::Item(k, value)
     } else {
         Entry::ValueOnly(value)
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseError {
-    Syntax { character: char },
-    SectionNameEmpty,
-    SectionNameTooLong,
-    UnclosedString,
-}
+fn normalize_value(mut value: &str) -> Result<String, ParseError> {
+    value = value.trim();
+    value = match (value.starts_with('"'), value.ends_with('"')) {
+        (true, true) => &value[1..value.len() - 1],
+        (false, false) => value,
+        // TODO: I feel like we should already know this based on previous `within_quotes` check.
+        _ => return Err(ParseError::UnterminatedString),
+    };
+    let value = value.replace("\"\"", "\"").replace("\\\\", "\\");
 
-impl error::Error for ParseError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        None
-    }
-}
+    // Note: We do not un-escape percent signs here since it will become ambiguous later whether
+    // they were supposed to be for string substitution or simply escaped percent signs.
 
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Syntax { character } => {
-                write!(f, "invalid syntax: unexpected character: {character}")
-            }
-            Self::SectionNameEmpty => "section name cannot be empty".fmt(f),
-            Self::SectionNameTooLong => "section name cannot exceed 255 characters".fmt(f),
-            Self::UnclosedString => {
-                "expected string value to have double quotes on both ends".fmt(f)
-            }
-        }
-    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -368,119 +281,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn multiline_value_with_inline_comment() {
-        let buffer = br#"
-; This is a comment
-
-[Section]
-key = value1,"value2;not-a-comment"\ ; This is an inline comment.
-,value3,,value5
-"#;
-
-        let inf = Inf::parse(buffer).expect("failed to parse hardcoded INF file");
-
-        assert_eq!(
-            inf.sections.get("Section"),
-            Some(&vec![Entry::Item(
-                "key".to_owned(),
-                Value::Raw("value1,\"value2;not-a-comment\",value3,,value5".to_owned())
-            )])
-        );
-    }
-
-    #[test]
-    fn multiple_keys_and_values() {
-        let buffer = br"
-[Section]
-key1 = value1
-key2 = value2
-key3 = value3
-";
-
-        let inf = Inf::parse(buffer).expect("failed to parse hardcoded INF file");
-
-        assert_eq!(
-            inf.sections.get("Section"),
-            Some(&vec![
-                Entry::Item("key1".to_owned(), Value::Raw("value1".to_owned())),
-                Entry::Item("key2".to_owned(), Value::Raw("value2".to_owned())),
-                Entry::Item("key3".to_owned(), Value::Raw("value3".to_owned())),
-            ])
-        );
-    }
-
-    #[test]
-    fn multiple_sections() {
-        let buffer = br#"
-[Version] ; This section is typically required.
-Signature = "$CHICAGO$"
-
-[Section]
-key = value
-"#;
-
-        let inf = Inf::parse(buffer).expect("failed to parse hardcoded INF file");
-
-        assert_eq!(
-            inf.sections.get("Version"),
-            Some(&vec![Entry::Item(
-                "Signature".to_owned(),
-                Value::Raw("$CHICAGO$".to_owned())
-            ),])
-        );
-        assert_eq!(
-            inf.sections.get("Section"),
-            Some(&vec![Entry::Item(
-                "key".to_owned(),
-                Value::Raw("value".to_owned())
-            ),])
-        );
-    }
-
-    #[test]
-    fn quoted_value_with_equal() {
-        let buffer = br#"
-[Section]
-"1+1=2"
-"#;
-
-        let inf = Inf::parse(buffer).expect("failed to parse hardcoded INF file");
-
-        assert_eq!(
-            inf.sections.get("Section"),
-            Some(&vec![Entry::ValueOnly(Value::Raw("1+1=2".to_owned()))])
-        );
-    }
-
-    #[test]
-    fn various_entry_kinds() {
-        parse_section_entry("\"1+1=2\",foo,,bar").expect("expected hardcoded value to pass");
-        parse_section_entry("key = value").expect("expected hardcoded value to pass");
-        parse_section_entry("key2=value2").expect("expected hardcoded value to pass");
-        parse_section_entry("key3 = \"value3\"").expect("expected hardcoded value to pass");
-    }
-
-    #[test]
     fn hoshimachi_inf() {
         // Uses quotes strings in section entries.
-        let buffer = include_bytes!("./Hoshimachi.inf");
-        let inf = Inf::parse(buffer).expect("failed to parse Hoshimachi.inf");
+        let buffer = include_bytes!("../Hoshimachi.inf");
+        let inf = Inf::from_bytes(buffer).expect("failed to parse Hoshimachi.inf");
         dbg!(&inf.sections);
     }
 
     #[test]
     fn novella_inf() {
         // Uses Windows' CRLF
-        let buffer = include_bytes!("./Novella.inf");
-        let inf = Inf::parse(buffer).expect("failed to parse Novella.inf");
+        let buffer = include_bytes!("../Novella.inf");
+        let inf = Inf::from_bytes(buffer).expect("failed to parse Novella.inf");
         dbg!(&inf.sections);
     }
 
     #[test]
     fn hornet_inf() {
         // Uses unquotes strings in section entries.
-        let buffer = include_bytes!("./Hornet.inf");
-        let inf = Inf::parse(buffer).expect("failed to parse Hornet.inf");
+        let buffer = include_bytes!("../Hornet.inf");
+        let inf = Inf::from_bytes(buffer).expect("failed to parse Hornet.inf");
         dbg!(&inf.sections);
     }
 }
