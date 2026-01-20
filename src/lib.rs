@@ -7,8 +7,6 @@
     clippy::pedantic
 )]
 
-mod parser;
-
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::{char, error, fmt};
@@ -21,7 +19,7 @@ const BOM_LE: &[u8] = &[0xFF, 0xFE];
 
 #[derive(Debug)]
 pub struct Inf {
-    sections: HashMap<String, Vec<Entry>>,
+    pub sections: HashMap<String, Vec<Entry>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,12 +40,27 @@ impl Inf {
         let mut chars = text.chars().peekable();
         let mut sections = HashMap::<String, Vec<Entry>>::with_capacity(14);
 
+        // TODO: Parse the [Strings[.*]] section first, and do string substitution while parsing
+        // entries.
+        //
+        // Or, clarify that string substitution has not occurred yet, and provide a helper util
+        // expand() function or something.
+        //
+        // Experiment with splitting the text into chunks at each section (adds way more complexity)
+        // -> text.find("[Strings")
+        //
+        // The Strings section is more complex than it seems, so make sure to read this while
+        // implementing it:
+        //
+        // https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-strings-section
         while let Some(c) = chars.next() {
             match c {
                 ';' => skip_comment(&mut chars),
                 '[' => parse_section(&mut chars, &mut sections)?,
+                // TODO: Handle CRLF, not only LF. Some sections appear as Raw("") because CR does
+                // not count as the LF.
                 c if c.is_ascii_whitespace() => {}
-                c => unimplemented!("{c:?}"),
+                c => return Err(ParseError::Syntax { character: c }),
             }
         }
 
@@ -97,7 +110,7 @@ where
     while chars.peek().is_some_and(|&c| c != '[') {
         if let Some(line) = read_line(chars) {
             let entry = parse_section_entry(&line);
-            entries.push(entry);
+            entries.push(entry?);
         }
     }
 
@@ -155,45 +168,178 @@ where
         return Err(ParseError::SectionNameTooLong);
     }
 
-    // Strip excess whitespace and comments.
+    // Strip excess whitespace and comments; break the loop after consuming the newline.
     while let Some(d) = chars.next() {
         match d {
             ';' => {
                 skip_comment(chars);
-                break; // Newline has already been consumed.
+                break;
             }
             '\n' => break,
-            c if c.is_ascii_whitespace() => {}
-            _ => return Err(ParseError::Syntax),
+            c if c.is_ascii_whitespace() => {
+                assert!(c != '\n', "newline should have been handled separately");
+            }
+            c => return Err(ParseError::Syntax { character: c }),
         }
     }
 
     Ok(section_name)
 }
 
-fn parse_section_entry(line: &str) -> Entry {
-    // TODO: To escape quotes, layer the double quotes (e.g., "This is an ""example"" value").
+fn parse_section_entry(line: &str) -> Result<Entry, ParseError> {
+    // TODO: There has to be a better way to ensure these things are true.
+    assert!(!line.is_empty());
+    assert!(!line.ends_with('\\'));
+    assert!(!line.contains('\n'));
 
-    // TODO: Track whether the equal sign is within quotes or not.
+    if line.starts_with('"') {
+        let mut values = Vec::<String>::new();
+        let mut within_quotes = true;
+        let mut start = 0usize;
 
-    if let Some(equal) = line.chars().position(|c| c == '=') {
-        let key = line[..equal].trim().to_owned();
-        let value = line[equal + 1..].trim().to_owned();
-        // TODO: Process values
-        Entry::Item(key, Value::Raw(value))
-    } else {
-        let value = line.trim().to_owned();
-        // TODO: Process values
-        Entry::ValueOnly(Value::Raw(value))
+        // Split at commas
+        for (i, c) in line.trim().char_indices().skip(1) {
+            match c {
+                '"' => within_quotes = !within_quotes,
+                ',' if !within_quotes => {
+                    let value = &line[start..i];
+                    let value = match (value.starts_with('"'), value.ends_with('"')) {
+                        (true, true) => &value[1..value.len() - 1],
+                        (false, false) => value,
+                        // TODO: Ensure that every string contains an opening AND closing double quote.
+                        // TODO: Either properly test this, or remove this error.
+                        _ => {
+                            println!("Debug: {value:?}");
+                            return Err(ParseError::UnclosedString);
+                        }
+                    };
+                    let value = value.replace("\"\"", "\"");
+                    let value = value.replace("\\\\", "\\");
+                    // TODO: If I collapse the double percent signs now, it will be ambiguous
+                    // whether it is supposed to be string subsitution or an escaped percent sign.
+                    // let value = value.replace("%%", "%");
+                    values.push(value);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+
+        // TODO: Process the value.
+        let value = line[start..].trim();
+        let value = match (value.starts_with('"'), value.ends_with('"')) {
+            (true, true) => value[1..value.len() - 1].trim(),
+            // TODO: Ensure that every string contains an opening AND closing double quote.
+            // TODO: Either properly test this, or remove this error.
+            (false, false) => value,
+            _ => {
+                println!("Debug: {value:?}");
+                return Err(ParseError::UnclosedString);
+            }
+        };
+        let value = value.replace("\"\"", "\"");
+        let value = value.replace("\\\\", "\\");
+        // TODO: If I collapse the double percent signs now, it will be ambiguous
+        // whether it is supposed to be string subsitution or an escaped percent sign.
+        // let value = value.replace("%%", "%");
+        values.push(value);
+        println!("{values:#?}");
+
+        if values.len() > 1 {
+            return Ok(Entry::ValueOnly(Value::List(values)));
+        } else if let Some(value) = values.first() {
+            return Ok(Entry::ValueOnly(Value::Raw(value.to_owned())));
+        }
     }
+
+    let mut within_quotes = false;
+    let mut values = Vec::<String>::new();
+    let mut key = None::<String>;
+    let mut start = 0usize;
+
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => within_quotes = !within_quotes,
+            ',' if !within_quotes => {
+                if key.is_some() {
+                    assert_ne!(start, 0);
+                }
+
+                // Process value
+                let value = line[start..i].trim();
+                let value = match (value.starts_with('"'), value.ends_with('"')) {
+                    (true, true) => value[1..value.len() - 1].trim(),
+                    (false, false) => value,
+                    // TODO: Ensure that every string contains an opening AND closing double quote.
+                    // TODO: Either properly test this, or remove this error.
+                    _ => {
+                        println!("Debug: {value:?}");
+                        return Err(ParseError::UnclosedString);
+                    }
+                };
+                let value = value.replace("\"\"", "\"");
+                let value = value.replace("\\\\", "\\");
+                // TODO: If I collapse the double percent signs now, it will be ambiguous
+                // whether it is supposed to be string subsitution or an escaped percent sign.
+                // let value = value.replace("%%", "%");
+                values.push(value);
+                // TODO: Do I need to handle if this is the end of the line?
+                //  value1,value2,,
+                start = i + 1;
+            }
+            '=' if !within_quotes => {
+                if !values.is_empty() {
+                    // NOTE: I am unsure whether this should be allowed or not: `"1+1=2",==,value3`
+                    continue;
+                }
+                key = Some(line[..i].trim().to_owned());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    // TODO: Process the value.
+    let value = line[start..].trim();
+    let value = match (value.starts_with('"'), value.ends_with('"')) {
+        (true, true) => value[1..value.len() - 1].trim(),
+        // TODO: Ensure that every string contains an opening AND closing double quote.
+        // TODO: Either properly test this, or remove this error.
+        (false, false) => value,
+        _ => {
+            println!("Debug: {value:?}");
+            return Err(ParseError::UnclosedString);
+        }
+    };
+    let value = value.replace("\"\"", "\"");
+    let value = value.replace("\\\\", "\\");
+    // TODO: If I collapse the double percent signs now, it will be ambiguous
+    // whether it is supposed to be string subsitution or an escaped percent sign.
+    // let value = value.replace("%%", "%");
+    values.push(value);
+    println!("Entries: {values:#?}");
+
+    assert!(!values.is_empty());
+
+    let value = if values.len() == 1 {
+        Value::Raw(values.remove(0))
+    } else {
+        Value::List(values)
+    };
+
+    Ok(if let Some(key) = key {
+        Entry::Item(key, value)
+    } else {
+        Entry::ValueOnly(value)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {
-    ReadFailed,
-    Syntax,
+    Syntax { character: char },
     SectionNameEmpty,
     SectionNameTooLong,
+    UnclosedString,
 }
 
 impl error::Error for ParseError {
@@ -205,9 +351,14 @@ impl error::Error for ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Syntax => "invalid syntax".fmt(f),
+            Self::Syntax { character } => {
+                write!(f, "invalid syntax: unexpected character: {character}")
+            }
             Self::SectionNameEmpty => "section name cannot be empty".fmt(f),
             Self::SectionNameTooLong => "section name cannot exceed 255 characters".fmt(f),
+            Self::UnclosedString => {
+                "expected string value to have double quotes on both ends".fmt(f)
+            }
         }
     }
 }
@@ -299,5 +450,37 @@ key = value
             inf.sections.get("Section"),
             Some(&vec![Entry::ValueOnly(Value::Raw("1+1=2".to_owned()))])
         );
+    }
+
+    #[test]
+    fn various_entry_kinds() {
+        parse_section_entry("\"1+1=2\",foo,,bar").expect("expected hardcoded value to pass");
+        parse_section_entry("key = value").expect("expected hardcoded value to pass");
+        parse_section_entry("key2=value2").expect("expected hardcoded value to pass");
+        parse_section_entry("key3 = \"value3\"").expect("expected hardcoded value to pass");
+    }
+
+    #[test]
+    fn hoshimachi_inf() {
+        // Uses quotes strings in section entries.
+        let buffer = include_bytes!("./Hoshimachi.inf");
+        let inf = Inf::parse(buffer).expect("failed to parse Hoshimachi.inf");
+        dbg!(&inf.sections);
+    }
+
+    #[test]
+    fn novella_inf() {
+        // Uses Windows' CRLF
+        let buffer = include_bytes!("./Novella.inf");
+        let inf = Inf::parse(buffer).expect("failed to parse Novella.inf");
+        dbg!(&inf.sections);
+    }
+
+    #[test]
+    fn hornet_inf() {
+        // Uses unquotes strings in section entries.
+        let buffer = include_bytes!("./Hornet.inf");
+        let inf = Inf::parse(buffer).expect("failed to parse Hornet.inf");
+        dbg!(&inf.sections);
     }
 }
