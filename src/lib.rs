@@ -10,6 +10,7 @@
 mod error;
 mod parser;
 mod section;
+pub mod util;
 
 use std::char;
 use std::io::Read;
@@ -193,8 +194,8 @@ mod tests {
             &vec![Section::new(
                 "Section".to_owned(),
                 vec![
-                    Entry::ValueOnly(Value::Raw("value".to_owned())),
-                    Entry::ValueOnly(Value::List(vec![
+                    Entry::Value(Value::Raw("value".to_owned())),
+                    Entry::Value(Value::List(vec![
                         "value1".to_owned(),
                         "value2".to_owned(),
                         String::new(),
@@ -318,7 +319,7 @@ mod tests {
             inf.sections(),
             &vec![Section::new(
                 "Section".to_owned(),
-                vec![Entry::ValueOnly(Value::Raw("1+1=2".to_owned()))]
+                vec![Entry::Value(Value::Raw("1+1=2".to_owned()))]
             )]
         );
     }

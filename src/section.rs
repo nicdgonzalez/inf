@@ -28,7 +28,7 @@ impl Section {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     Item(String, Value),
-    ValueOnly(Value),
+    Value(Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

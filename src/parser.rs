@@ -67,7 +67,7 @@ impl Parser<'_> {
         };
 
         while self.chars.peek().is_some_and(|&c| c != '[') {
-            if let Some(line) = self.read_next_entry() {
+            if let Some(line) = self.read_next_entry()? {
                 let entry = parse_section_entry(&line)?;
                 entries.push(entry);
             }
@@ -109,7 +109,7 @@ impl Parser<'_> {
     }
 
     /// Read the next entry while flattening Line Continuators (\) and stripping inline comments.
-    fn read_next_entry(&mut self) -> Option<String> {
+    fn read_next_entry(&mut self) -> Result<Option<String>, ParseError> {
         let mut line = String::with_capacity(4096);
         let mut within_quotes = false;
 
@@ -117,14 +117,27 @@ impl Parser<'_> {
             let current = self
                 .chars
                 .by_ref()
-                .take_while(|&c| c != '\n')
+                .take_while(|&c| {
+                    if c == '"' {
+                        within_quotes = !within_quotes;
+                    }
+
+                    // If within double quotes, consume everything (including newlines).
+                    // TODO: This might be special to the [Strings] section; we are applying it
+                    // here to all sections. Additional research required.
+                    within_quotes || c != '\n'
+                })
                 .collect::<String>();
             let mut current = current
                 .strip_suffix('\r')
                 .unwrap_or(current.as_str())
                 .trim_end();
 
-            // Strip inline comments
+            if within_quotes {
+                return Err(ParseError::UnterminatedString);
+            }
+
+            // Trim inline comments
             for (i, c) in current.char_indices() {
                 match c {
                     '"' => within_quotes = !within_quotes,
@@ -134,6 +147,10 @@ impl Parser<'_> {
                     }
                     _ => {}
                 }
+            }
+
+            if within_quotes {
+                return Err(ParseError::UnterminatedString);
             }
 
             // If the line ends with a Line Continuator, strip it and continue to next line.
@@ -146,7 +163,7 @@ impl Parser<'_> {
             break;
         }
 
-        if line.is_empty() { None } else { Some(line) }
+        Ok(if line.is_empty() { None } else { Some(line) })
     }
 }
 
@@ -199,7 +216,7 @@ fn parse_section_entry(line: &str) -> Result<Entry, ParseError> {
     Ok(if let Some(k) = key {
         Entry::Item(k, value)
     } else {
-        Entry::ValueOnly(value)
+        Entry::Value(value)
     })
 }
 
