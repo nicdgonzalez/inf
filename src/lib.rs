@@ -53,6 +53,39 @@ impl Inf {
     pub fn sections(&self) -> &[Section] {
         &self.sections
     }
+
+    /// Returns the first section whose name matches `name`, ignoring ASCII case.
+    ///
+    /// This function iterates over each section from the top of the INF file to the bottom.
+    /// The comparison is ASCII case-insensitive and does not allocate. If no section matches
+    /// the name provided, `None` is returned instead.
+    ///
+    /// # Performance
+    ///
+    /// This function performs a linear scan over all sections and has a **O(n)** time complexity.
+    ///
+    /// # Notes
+    ///
+    /// This method performs ASCII-only case folding. Non-ASCII characters must match exactly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use inf::Inf;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let inf = Inf::from_bytes(b"[Version]\nSignature=\"$Chicago$\"")?;
+    /// let section = inf.get("version").unwrap();
+    /// assert_eq!(section.name(), "Version");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&Section> {
+        self.sections
+            .iter()
+            .find(|section| name.eq_ignore_ascii_case(section.name()))
+    }
 }
 
 impl TryFrom<&[u8]> for Inf {
