@@ -13,7 +13,9 @@ mod section;
 pub mod util;
 
 use std::char;
+use std::fs::File;
 use std::io::Read;
+use std::path::Path;
 
 pub use error::ParseError;
 pub use section::{Entry, Section, Value};
@@ -33,7 +35,16 @@ pub struct Inf {
 }
 
 impl Inf {
-    pub fn from_reader<R>(reader: &mut R) -> Result<Self, ParseError>
+    pub fn open<P>(path: P) -> Result<Self, ParseError>
+    where
+        P: AsRef<Path>,
+    {
+        File::open(path)
+            .map_err(|source| ParseError::ReadFailure { source })
+            .and_then(Self::from_reader)
+    }
+
+    pub fn from_reader<R>(mut reader: R) -> Result<Self, ParseError>
     where
         R: Read,
     {
