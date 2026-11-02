@@ -7,3 +7,6 @@
     clippy::style,
     clippy::pedantic
 )]
+
+mod lexer;
+mod token;
