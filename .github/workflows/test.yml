@@ -1,0 +1,122 @@
+permissions:
+  contents: read
+
+# This workflow runs when a PR is opened or updated, or a commit is pushed to branch `main`.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancels in-progress workflows when new code is pushed to a PR branch. This ensures CI time
+# is not wasted and results are returned quicker.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+name: test
+jobs:
+  # Runs the test suite on Ubuntu with the Stable and Beta toolchains. This allows for
+  # early detection of test breakage in the next version of the Rust toolchain.
+  required:
+    runs-on: ubuntu-latest
+    name: ubuntu / ${{ matrix.toolchain }}
+    strategy:
+      matrix:
+        toolchain: [stable, beta]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+      - name: Install ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: cargo generate-lockfile
+        # Generate a new lockfile if not already checked into the repository which allows
+        # this workflow to always run.
+        if: hashFiles('Cargo.lock') == ''
+        run: cargo generate-lockfile
+      # https://twitter.com/jonhoo/status/1571290371124260865
+      - name: cargo test --locked
+        run: cargo test --locked --all-features --all-targets
+      # https://github.com/rust-lang/cargo/issues/6669
+      - name: cargo test --doc
+        run: cargo test --locked --all-features --doc
+
+  # Runs tests using the oldest version of dependencies as permitted by `Cargo.toml`.
+  #
+  # This will pick up issues where this crate relies on functionality that was introduced
+  # in a later version than the one specified (e.g., only a major version was specified,
+  # but a method used was added in a later version).
+  #
+  # It can be difficult to get this check to succeed, as transitive dependencies may be incorrectly
+  # specified (e.g., a dependency specified "1", but really requires "1.1.5"). There is also
+  # an alternative flag available (`-Zdirect-minimal-versions`) which uses the minimum versions
+  # for direct dependencies of this crate while selecting the maximum versions
+  # for transitive dependencies.
+  #
+  # Alternatively, the following can be added to your `Cargo.toml` to artificially increase
+  # the mimimum dependency:
+  #
+  # ```toml
+  # [target.'cfg(any())'.dependencies]
+  # openssl = { version = "0.10.55", optional = true }
+  # ```
+  #
+  # The `optional = true` is necessary in case the dependency is not otherwise
+  # transitively required by your library. The `target` bit is so this dependency edge
+  # does not affect the Cargo build order.
+  #
+  # For a real-world use case, see:
+  # https://github.com/jonhoo/fantoccini/blob/fde336472b712bc7ebf5b4e772023a7ba71b2262/Cargo.toml#L47-L49.
+  #
+  # This action runs on Ubuntu with the Stable toolchain as it is not expected to fail.
+  minimal:
+    runs-on: ubuntu-latest
+    name: ubuntu / stable / minimal-versions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: stable
+      - name: Install nightly for -Zminimal-versions
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: nightly
+      - name: rustup default stable
+        run: rustup default stable
+      - name: cargo update -Zminimal-versions
+        run: cargo +nightly update -Zminimal-versions
+      - name: cargo test
+        run: cargo test --locked --all-features --all-targets
+
+  # Runs `cargo test` on Mac and Windows.
+  os-check:
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} / stable
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      # If your project needs OpenSSL, uncomment this to fix Windows builds.
+      # it's commented out by default as the install command takes 5-10m.
+      # - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+      #   if: runner.os == 'Windows'
+      # - run: vcpkg install openssl:x64-windows-static-md
+      #   if: runner.os == 'Windows'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: stable
+      - name: cargo generate-lockfile
+        if: hashFiles('Cargo.lock') == ''
+        run: cargo generate-lockfile
+      - name: cargo test
+        run: cargo test --locked --all-features --all-targets

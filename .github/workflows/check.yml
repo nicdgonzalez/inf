@@ -1,0 +1,140 @@
+permissions:
+  contents: read
+
+# This workflow runs when a PR is opened or updated, or a commit is pushed to branch `main`.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancels in-progress workflows when new code is pushed to a PR branch. This ensures CI time
+# is not wasted and results are returned quicker.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+name: check
+jobs:
+  # Checks that the code is formatted according to `rustfmt`.
+  fmt:
+    runs-on: ubuntu-latest
+    name: stable / fmt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+  # Checks that the code does not produce any clippy warnings.
+  clippy:
+    runs-on: ubuntu-latest
+    name: ${{ matrix.toolchain }} / clippy
+    permissions:
+      contents: read
+      checks: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Get early warnings from new lints which are introduced regularly in beta channels.
+        toolchain: [stable, beta]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+      - name: Install ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - name: cargo clippy
+        uses: giraffate/clippy-action@13b9d32482f25d29ead141b79e7e04e7900281e0 # tag=v1.0.1
+        with:
+          reporter: "github-pr-check"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Checks `Cargo.toml` for semver violations.
+  semver:
+    runs-on: ubuntu-latest
+    name: semver
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: cargo-semver-checks
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # tag=v2.9
+
+  # Checks that documentation can be built without any errors.
+  doc:
+    # Documentation is generated with nightly rather than stable; this enables features
+    # like `doc_cfg` which allows an API to be documented with "Available on (platform) only."
+    #
+    # https://doc.rust-lang.org/beta/unstable-book/language-features/doc-cfg.html
+    runs-on: ubuntu-latest
+    name: nightly / doc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+      - name: Install nightly
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: nightly
+      - name: Install cargo-docs-rs
+        uses: dtolnay/install@982daea0f5d846abc3c83e01a6a1d73c040047c1 # branch=cargo-docs-rs
+      - name: cargo docs-rs
+        run: cargo docs-rs
+
+  # Checks that all feature flags combinations are additive--a requirement for feature unification.
+  hack:
+    runs-on: ubuntu-latest
+    name: ubuntu / stable / features
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: stable
+      - name: cargo install cargo-hack
+        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # tag=v2.85.4
+        with:
+          tool: cargo-hack
+      - name: cargo hack
+        run: cargo hack --feature-powerset check
+
+  # Checks that the project can be built using the Minimum Supported Rust Version (MSRV)
+  # specified by this crate.
+  msrv:
+    runs-on: ubuntu-latest
+    # Uses a matrix because environment variables cannot be used in job names.
+    # https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability
+    strategy:
+      matrix:
+        msrv: ["1.85"] # 2024 edition requires 1.85
+    name: ubuntu / ${{ matrix.msrv }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          submodules: true
+      - name: Install ${{ matrix.msrv }}
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: ${{ matrix.msrv }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # tag=v6.1.0
+        with:
+          path: ~/.cargo
+          key: ${{ runner.os }}-cargo
+      - name: cargo +${{ matrix.msrv }} check
+        run: cargo check
