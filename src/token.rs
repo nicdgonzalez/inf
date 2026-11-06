@@ -1,4 +1,4 @@
-use std::ops::Range;
+use crate::span::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
@@ -15,16 +15,19 @@ pub enum TokenKind {
     Backslash,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token<'a> {
-    pub input: &'a str,
     pub kind: TokenKind,
-    pub span: Range<usize>,
+    pub span: Span<'a>,
 }
 
 impl<'a> Token<'a> {
     #[must_use]
-    pub const fn new(input: &'a str, kind: TokenKind, span: Range<usize>) -> Self {
-        Self { input, kind, span }
+    pub const fn new(kind: TokenKind, span: Span<'a>) -> Self {
+        Self { kind, span }
+    }
+
+    pub fn view(&self) -> &str {
+        self.span.view()
     }
 }

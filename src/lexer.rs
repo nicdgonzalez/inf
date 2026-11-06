@@ -1,6 +1,11 @@
-#![allow(dead_code)]
+use static_assertions::assert_not_impl_all;
 
+use crate::span::Span;
 use crate::token::{Token, TokenKind};
+
+// Implicit copies can be confusing when working with iterator combinators.
+// https://clippy.rust-lang.org/rust-1.99.0/index.html#copy_iterator
+assert_not_impl_all!(Tokens: Copy);
 
 #[must_use]
 pub fn tokenize(input: &str) -> Tokens<'_> {
@@ -11,12 +16,14 @@ pub fn tokenize(input: &str) -> Tokens<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Tokens<'a> {
     input: &'a str,
     position: usize,
     mode: Mode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,
     Section,
@@ -123,7 +130,10 @@ impl<'a> Tokens<'a> {
         debug_assert!(offset > 0);
         self.position += offset;
 
-        LexResult::Token(Token::new(self.input, kind, start..self.position))
+        LexResult::Token(Token::new(
+            kind,
+            Span::new(self.input, start, self.position).unwrap(),
+        ))
     }
 
     fn section(&mut self) -> LexResult<'a> {
@@ -139,9 +149,8 @@ impl<'a> Tokens<'a> {
         self.mode = Mode::Normal;
 
         LexResult::Token(Token::new(
-            self.input,
             TokenKind::Identifier,
-            start..self.position,
+            Span::new(self.input, start, self.position).unwrap(),
         ))
     }
 
@@ -175,9 +184,8 @@ impl<'a> Tokens<'a> {
                 self.mode = Mode::Normal;
 
                 return LexResult::Token(Token::new(
-                    self.input,
                     TokenKind::DoubleQuote,
-                    start..self.position,
+                    Span::new(self.input, start, self.position).unwrap(),
                 ));
             }
 
@@ -202,9 +210,8 @@ impl<'a> Tokens<'a> {
         }
 
         LexResult::Token(Token::new(
-            self.input,
             TokenKind::String,
-            start..self.position,
+            Span::new(self.input, start, self.position).unwrap(),
         ))
     }
 }
