@@ -8,12 +8,11 @@ Syntax validation is based on [Microsoft's INF specification][spec]. This crate
 aims to provide detailed, helpful error messages when syntax rules are
 violated.
 
-This crate is an independently testable part of a larger project, [ani2xcur].
-
-The project was split into separate repositories for two reasons: first, it
-makes it easier to reuse this library in other projects; and second, it allows
-independent components to run its own checks in localized CI workflows (which
-is something I am currently experimenting with).
+This crate is an independently testable part of [ani2xcur]. The project was
+split into separate repositories for two reasons: first, it makes it easier to
+reuse this library in other projects; and second, it allows each component to
+run its own localized CI workflows--which is something I am currently
+experimenting with.
 
 ## Usage
 

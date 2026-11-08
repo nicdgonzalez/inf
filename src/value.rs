@@ -1,7 +1,22 @@
+use std::slice;
+
+/// Kinds of values in an [`Entry`][crate::Entry].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
+    /// Contains a single value.
     Raw(String),
+    /// Contains multiple values.
     List(Vec<String>),
+}
+
+impl Value {
+    #[must_use]
+    pub fn as_slice(&self) -> &[String] {
+        match self {
+            Self::Raw(value) => slice::from_ref(value),
+            Self::List(values) => values.as_slice(),
+        }
+    }
 }
 
 impl From<String> for Value {

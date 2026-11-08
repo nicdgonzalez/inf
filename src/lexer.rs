@@ -3,10 +3,7 @@ use static_assertions::assert_not_impl_all;
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
-// Implicit copies can be confusing when working with iterator combinators.
-// https://clippy.rust-lang.org/rust-1.99.0/index.html#copy_iterator
-assert_not_impl_all!(Tokens: Copy);
-
+/// Performs lexical analysis and returns an iterator of [`Token`]s.
 #[must_use]
 pub fn tokenize(input: &str) -> Tokens<'_> {
     Tokens {
@@ -16,6 +13,11 @@ pub fn tokenize(input: &str) -> Tokens<'_> {
     }
 }
 
+// Implicit copies can be confusing when working with iterator combinators.
+// https://clippy.rust-lang.org/rust-1.99.0/index.html#copy_iterator
+assert_not_impl_all!(Tokens: Copy);
+
+/// Represents an on-going lexical analysis.
 #[derive(Debug, Clone)]
 pub struct Tokens<'a> {
     input: &'a str,
@@ -23,6 +25,7 @@ pub struct Tokens<'a> {
     mode: Mode,
 }
 
+/// Different contexts for interpreting characters while lexing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,

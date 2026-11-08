@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+encoding_rs = "0.8.44"
 static_assertions = "1.1.0"

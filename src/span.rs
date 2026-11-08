@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span<'a> {
     input: &'a str,
@@ -19,14 +17,5 @@ impl<'a> Span<'a> {
     #[must_use]
     pub fn view(&self) -> &str {
         &self.input[self.start..self.end]
-    }
-}
-
-impl From<Span<'_>> for Range<usize> {
-    fn from(value: Span<'_>) -> Self {
-        Self {
-            start: value.start,
-            end: value.end,
-        }
     }
 }

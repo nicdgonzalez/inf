@@ -9,6 +9,7 @@ use crate::section::Section;
 use crate::token::{Token, TokenKind};
 use crate::value::Value;
 
+/// Represents an on-going parse.
 #[derive(Debug, Clone)]
 pub struct Parser<'a> {
     cursor: Cursor<'a>,
