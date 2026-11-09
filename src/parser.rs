@@ -5,7 +5,7 @@ use crate::Inf;
 use crate::cursor::Cursor;
 use crate::entry::Entry;
 use crate::lexer::tokenize;
-use crate::section::Section;
+use crate::section::{Section, SectionError};
 use crate::token::{Token, TokenKind};
 use crate::value::Value;
 
@@ -86,7 +86,7 @@ impl<'a> Parser<'a> {
             vec![]
         };
 
-        Ok(Section::new(section_name, entries))
+        Ok(Section::new(section_name, entries).expect("section name already validated"))
     }
 
     fn expect_newline(&mut self) -> Result<bool, ParseError> {
@@ -111,30 +111,12 @@ impl<'a> Parser<'a> {
     fn get_section_name(&self, token: Token<'a>) -> Result<String, ParseError> {
         let name = token.view();
 
-        // Some Grapheme Clusters appear as a single character, but are handled as two
-        // separate characters programatically (e.g., "y̆" is actually `y` and `U+0306`).
-        // The character limit for section names is 255 characters, but depending on how
-        // characters are interpreted changes how this function should be implemented.
-        //
-        // I'm going to assume 255 represents a buffer's capacity, and that it was chosen because
-        // it is the maximum value of a `u8` (one byte). If 255 is the total number of bytes
-        // a section name may occupy, then "y̆" counts as 2 slots, not 1.
-        //
-        // On Windows, there exists a tool called `InfVerif` which can be used to verify which
-        // interpretation is correct, but I don't currently have a Windows machine to test with.
-        //
-        // https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/infverif
-        match name.len() {
-            0 => Err(ParseError {
-                kind: ErrorKind::EmptySectionName,
-                line: self.line,
-            }),
-            1..=255 => Ok(name.to_owned()),
-            length => Err(ParseError {
-                kind: ErrorKind::LongSectionName { length },
-                line: self.line,
-            }),
-        }
+        Section::validate_name(name).map_err(|source| ParseError {
+            kind: ErrorKind::InvalidSectionName { source },
+            line: self.line,
+        })?;
+
+        Ok(name.to_owned())
     }
 
     fn parse_entries(&mut self) -> Result<Vec<Entry>, ParseError> {
@@ -309,9 +291,8 @@ pub enum ErrorKind {
         expected: TokenKind,
         actual: Option<TokenKind>,
     },
-    EmptySectionName,
-    LongSectionName {
-        length: usize,
+    InvalidSectionName {
+        source: SectionError,
     },
 }
 
@@ -329,10 +310,7 @@ impl fmt::Display for ParseError {
             ErrorKind::UnexpectedToken { expected, actual } => {
                 write!(f, "expected token {expected:?}, got {actual:?}")
             }
-            ErrorKind::EmptySectionName => "empty section name".fmt(f),
-            ErrorKind::LongSectionName { length } => {
-                write!(f, "section name exceeds 255 characters (got {length}")
-            }
+            ErrorKind::InvalidSectionName { .. } => "invalid section name".fmt(f),
         }
     }
 }
@@ -369,7 +347,9 @@ mod tests {
         assert!(matches!(
             error,
             ParseError {
-                kind: ErrorKind::EmptySectionName,
+                kind: ErrorKind::InvalidSectionName {
+                    source: SectionError::Empty
+                },
                 line: 1
             }
         ));
@@ -386,7 +366,9 @@ mod tests {
         assert!(matches!(
             error,
             ParseError {
-                kind: ErrorKind::LongSectionName { length: 268 },
+                kind: ErrorKind::InvalidSectionName {
+                    source: SectionError::TooLong { length: 268 }
+                },
                 line: 1
             }
         ));
@@ -399,7 +381,7 @@ mod tests {
 
         assert_eq!(
             inf.sections,
-            vec![Section::new("Version".to_owned(), vec![])]
+            vec![Section::new("Version".to_owned(), vec![]).unwrap()]
         );
     }
 
@@ -434,13 +416,16 @@ mod tests {
 
         assert_eq!(
             inf.sections,
-            vec![Section::new(
-                "Version".to_owned(),
-                vec![Entry::Item(
-                    "Signature".to_owned(),
-                    Value::Raw("$CHICAGO$".to_owned()),
-                )]
-            )]
+            vec![
+                Section::new(
+                    "Version".to_owned(),
+                    vec![Entry::Item(
+                        "Signature".to_owned(),
+                        Value::Raw("$CHICAGO$".to_owned()),
+                    )]
+                )
+                .unwrap()
+            ]
         );
     }
 
@@ -458,13 +443,16 @@ mod tests {
 
         assert_eq!(
             inf.sections,
-            vec![Section::new(
-                "Version".to_owned(),
-                vec![Entry::Item(
-                    "Signature".to_owned(),
-                    Value::Raw("$CHICAGO$".to_owned()),
-                )]
-            )]
+            vec![
+                Section::new(
+                    "Version".to_owned(),
+                    vec![Entry::Item(
+                        "Signature".to_owned(),
+                        Value::Raw("$CHICAGO$".to_owned()),
+                    )]
+                )
+                .unwrap()
+            ]
         );
     }
 
@@ -478,13 +466,16 @@ mod tests {
 
         assert_eq!(
             inf.sections,
-            vec![Section::new(
-                "Section".to_owned(),
-                vec![Entry::ValueOnly(Value::List(vec![
-                    "=".to_owned(),
-                    "Hello, World!".to_owned(),
-                ]))]
-            )]
+            vec![
+                Section::new(
+                    "Section".to_owned(),
+                    vec![Entry::ValueOnly(Value::List(vec![
+                        "=".to_owned(),
+                        "Hello, World!".to_owned(),
+                    ]))]
+                )
+                .unwrap()
+            ]
         );
     }
 
@@ -498,10 +489,13 @@ mod tests {
 
         assert_eq!(
             inf.sections,
-            vec![Section::new(
-                "Scheme.Cur".to_owned(),
-                vec![Entry::ValueOnly(Value::Raw("Default.ani".to_owned()))],
-            )]
+            vec![
+                Section::new(
+                    "Scheme.Cur".to_owned(),
+                    vec![Entry::ValueOnly(Value::Raw("Default.ani".to_owned()))],
+                )
+                .unwrap()
+            ]
         );
     }
 
@@ -516,19 +510,22 @@ mod tests {
 
         assert_eq!(
             inf.sections,
-            vec![Section::new(
-                "Section".to_owned(),
-                vec![Entry::Item(
-                    "key".to_owned(),
-                    Value::List(vec![
-                        "value1".to_owned(),
-                        "value2;not-a-comment".to_owned(),
-                        "value3".to_owned(),
-                        String::new(),
-                        "value5".to_owned(),
-                    ]),
-                )],
-            )]
+            vec![
+                Section::new(
+                    "Section".to_owned(),
+                    vec![Entry::Item(
+                        "key".to_owned(),
+                        Value::List(vec![
+                            "value1".to_owned(),
+                            "value2;not-a-comment".to_owned(),
+                            "value3".to_owned(),
+                            String::new(),
+                            "value5".to_owned(),
+                        ]),
+                    )],
+                )
+                .unwrap()
+            ]
         );
     }
 
@@ -543,13 +540,16 @@ mod tests {
 
         assert_eq!(
             inf.sections,
-            vec![Section::new(
-                "DefaultInstall".to_owned(),
-                vec![Entry::Item(
-                    "CopyFiles".to_owned(),
-                    Value::List(vec!["SomeDirectory\\".to_owned(), "SomeFile".to_owned()]),
-                )],
-            )]
+            vec![
+                Section::new(
+                    "DefaultInstall".to_owned(),
+                    vec![Entry::Item(
+                        "CopyFiles".to_owned(),
+                        Value::List(vec!["SomeDirectory\\".to_owned(), "SomeFile".to_owned()]),
+                    )],
+                )
+                .unwrap()
+            ]
         );
     }
 
@@ -565,9 +565,9 @@ mod tests {
         assert_eq!(
             inf.sections,
             vec![
-                Section::new("Section1".to_owned(), vec![]),
-                Section::new("Section2".to_owned(), vec![]),
-                Section::new("Section3".to_owned(), vec![]),
+                Section::new("Section1".to_owned(), vec![]).unwrap(),
+                Section::new("Section2".to_owned(), vec![]).unwrap(),
+                Section::new("Section3".to_owned(), vec![]).unwrap(),
             ]
         );
     }
@@ -584,19 +584,22 @@ mod tests {
 
         assert_eq!(
             inf.sections,
-            vec![Section::new(
-                "Section".to_owned(),
-                vec![
-                    Entry::ValueOnly(Value::Raw("value".to_owned())),
-                    Entry::ValueOnly(Value::List(vec![
-                        "value1".to_owned(),
-                        "value2".to_owned(),
-                        String::new(),
-                        "value4\\".to_owned()
-                    ])),
-                    Entry::Item("key".to_owned(), Value::Raw("value".to_owned())),
-                ]
-            )]
+            vec![
+                Section::new(
+                    "Section".to_owned(),
+                    vec![
+                        Entry::ValueOnly(Value::Raw("value".to_owned())),
+                        Entry::ValueOnly(Value::List(vec![
+                            "value1".to_owned(),
+                            "value2".to_owned(),
+                            String::new(),
+                            "value4\\".to_owned()
+                        ])),
+                        Entry::Item("key".to_owned(), Value::Raw("value".to_owned())),
+                    ]
+                )
+                .unwrap()
+            ]
         );
     }
 }

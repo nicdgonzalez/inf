@@ -10,6 +10,8 @@ pub enum Value {
 }
 
 impl Value {
+    /// Returns the inner value(s) as a slice. If `self` is [`Value::Raw`], returns the inner value
+    /// as a slice with a length of 1.
     #[must_use]
     pub fn as_slice(&self) -> &[String] {
         match self {

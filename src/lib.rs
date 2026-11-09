@@ -1,15 +1,12 @@
 #![doc = include_str!("../README.md")]
 #![warn(
+    missing_docs,
     clippy::correctness,
     clippy::suspicious,
     clippy::complexity,
     clippy::perf,
     clippy::style,
     clippy::pedantic
-)]
-#![allow(
-    clippy::missing_errors_doc,
-    reason = "to avoid breaking CI; future commit will add documentation"
 )]
 
 use std::error::Error;
@@ -50,12 +47,25 @@ pub struct Inf {
 }
 
 impl Inf {
+    /// Creates an [`Inf`] from the file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened, or contains invalid data.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, InfError> {
         File::open(path.as_ref())
             .map_err(|source| InfError::Open { source })
             .and_then(Self::from_reader)
     }
 
+    /// Creates an [`Inf`] from a reader.
+    ///
+    /// This function reads the remaining bytes in `reader`, then calls [`Self::from_bytes`]
+    /// with that data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `reader` fails to provide the data, or the data provided is invalid.
     pub fn from_reader(mut reader: impl Read) -> Result<Self, InfError> {
         let mut buffer = Vec::new();
         _ = reader
@@ -65,6 +75,28 @@ impl Inf {
         Self::from_bytes(&buffer)
     }
 
+    /// Creates an [`Inf`] from bytes.
+    ///
+    /// This function includes Byte Order Mark (BOM) sniffing to determine whether the data was
+    /// [encoded with UTF-16 LE or Windows 1252 file encoding][encoding]. Invalid code points
+    /// are replaced with the [replacement character][char::REPLACEMENT_CHARACTER] (`U+FFFD`).
+    ///
+    /// If the buffer's encoding is already known, alternative constructors are available:
+    ///
+    /// - [`Self::from_utf16le_lossy`]
+    /// - [`Self::from_windows_1252_lossy`]
+    ///
+    /// Alternative constructors that return an error on invalid input:
+    ///
+    /// - [`Self::from_utf16le`]
+    /// - [`Self::from_windows_1252`]
+    ///
+    /// [encoding]: https://learn.microsoft.com/en-us/windows-hardware/drivers/display/general-unicode-requirement
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data contains invalid code points for the selected encoding,
+    /// or the decoded contents contain syntax errors that prevent parsing.
     pub fn from_bytes(value: &[u8]) -> Result<Self, InfError> {
         if value.starts_with(&BOM_LE) {
             Self::from_utf16le_lossy(value)
@@ -73,6 +105,11 @@ impl Inf {
         }
     }
 
+    /// Creates an [`Inf`] from UTF-16-LE-encoded bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `data` contains invalid code points, or is syntactically invalid.
     pub fn from_utf16le(data: &[u8]) -> Result<Self, InfError> {
         let value = data.strip_prefix(&BOM_LE).unwrap_or(data);
         String::from_utf16le(value)
@@ -80,11 +117,22 @@ impl Inf {
             .parse()
     }
 
+    /// Creates an [`Inf`] from UTF-16-LE-encoded bytes, with invalid code points replaced with
+    /// the [replacement character][char::REPLACEMENT_CHARACTER].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if parsing fails due to syntactically invalid `data`.
     pub fn from_utf16le_lossy(data: &[u8]) -> Result<Self, InfError> {
         let value = data.strip_prefix(&BOM_LE).unwrap_or(data);
         String::from_utf16le_lossy(value).parse()
     }
 
+    /// Creates an [`Inf`] from Windows-1252-encoded bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `data` contains invalid code points, or is syntactically invalid.
     pub fn from_windows_1252(data: &[u8]) -> Result<Self, InfError> {
         // encoding_rs follows the WHATWG Encoding Standard, which maps Windows 1252's undefined
         // code points to C1 control code points rather than treating them as decoding errors.
@@ -119,15 +167,24 @@ impl Inf {
         matches!(byte, 0x81 | 0x8D | 0x8F | 0x90 | 0x9D)
     }
 
+    /// Creates an [`Inf`] from Windows-1252-encoded bytes, with invalid code points replaced with
+    /// the [replacement character][char::REPLACEMENT_CHARACTER].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `data` contains invalid code points, or is syntactically invalid.
     pub fn from_windows_1252_lossy(data: &[u8]) -> Result<Self, InfError> {
         WINDOWS_1252.decode_without_bom_handling(data).0.parse()
     }
 
+    /// Returns a reference to the sections in this INF.
     #[must_use]
     pub fn sections(&self) -> &[Section] {
         &self.sections
     }
 
+    /// Performs a case-insensitive search for a section with the same name. If a match is found,
+    /// a reference to that section is returned, otherwise `None` is returned.
     #[must_use]
     pub fn get_section(&self, name: &str) -> Option<&Section> {
         self.sections
@@ -135,20 +192,30 @@ impl Inf {
             .find(|section| section.name().eq_ignore_ascii_case(name))
     }
 
+    /// Performs a case-insensitive search for a section with the same name. If a match is found,
+    /// a mutable reference to that section is returned, otherwise `None` is returned.
     pub fn get_section_mut(&mut self, name: &str) -> Option<&mut Section> {
         self.sections
             .iter_mut()
             .find(|section| section.name().eq_ignore_ascii_case(name))
     }
 
+    /// Appends `section` to the INF and returns a mutable reference to it.
     pub fn add_section(&mut self, section: Section) -> &mut Section {
         self.sections.push_mut(section)
     }
 
+    /// Returns a reference to the `Strings` section if it exists. Otherwise, returns a reference
+    /// to an internally-stored, empty `Strings` section.
+    ///
+    /// This is mainly a convenience for passing a `Strings` section to
+    /// [`expand`][crate::strkey::expand].
     #[must_use]
     pub fn strings(&self) -> &Section {
-        static EMPTY_STRINGS: LazyLock<Section> =
-            LazyLock::new(|| Section::new("Strings".to_owned(), vec![]));
+        static EMPTY_STRINGS: LazyLock<Section> = LazyLock::new(|| {
+            Section::new("Strings".to_owned(), vec![])
+                .expect("hard-coded section name should be valid")
+        });
 
         self.get_section("Strings").unwrap_or(&*EMPTY_STRINGS)
     }
@@ -167,11 +234,28 @@ impl FromStr for Inf {
 /// Errors that can occur while parsing an INF-formatted buffer.
 #[derive(Debug)]
 pub enum InfError {
-    Open { source: io::Error },
-    Read { source: io::Error },
-    InvalidUtf16Le { source: FromUtf16Error },
+    /// Failed to open file.
+    Open {
+        /// Parent error in a chain of causes.
+        source: io::Error,
+    },
+    /// Failed to read data from a file.
+    Read {
+        /// Parent error in a chain of causes.
+        source: io::Error,
+    },
+    /// Text contains invalid UTF-16-LE code points.
+    InvalidUtf16Le {
+        /// Parent error in a chain of causes.
+        source: FromUtf16Error,
+    },
+    /// Text contains invalid Windows 1252 code points.
     InvalidWindows1252,
-    Parse { source: ParseError },
+    /// Failed to parse text.
+    Parse {
+        /// Parent error in a chain of causes.
+        source: ParseError,
+    },
 }
 
 impl Error for InfError {

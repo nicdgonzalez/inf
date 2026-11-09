@@ -10,6 +10,7 @@ pub enum Entry {
 }
 
 impl Entry {
+    /// Returns the entry's key or `None` if `self` is [`Entry::ValueOnly`].
     #[must_use]
     pub fn key(&self) -> Option<&str> {
         match self {
@@ -18,6 +19,7 @@ impl Entry {
         }
     }
 
+    /// Returns a reference to the entry's value.
     #[must_use]
     pub fn value(&self) -> &Value {
         match self {
