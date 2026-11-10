@@ -4,7 +4,7 @@ use std::fmt;
 use crate::Inf;
 use crate::cursor::Cursor;
 use crate::entry::Entry;
-use crate::lexer::tokenize;
+use crate::lexer::Lexer;
 use crate::section::{Section, SectionError};
 use crate::token::{Token, TokenKind};
 use crate::value::Value;
@@ -19,7 +19,8 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     #[must_use]
     pub fn new(input: &'a str) -> Self {
-        let tokens = tokenize(input);
+        let lexer = Lexer::new(input);
+        let tokens = lexer.tokens();
         let cursor = Cursor::new(tokens);
 
         Self { cursor, line: 1 }
@@ -38,7 +39,15 @@ impl Parser<'_> {
                 }
                 TokenKind::LBracket => {
                     let section = self.parse_section()?;
-                    sections.push(section);
+
+                    if let Some(existing) = sections
+                        .iter_mut()
+                        .find(|e| e.name().eq_ignore_ascii_case(section.name()))
+                    {
+                        existing.merge(section);
+                    } else {
+                        sections.push(section);
+                    }
                 }
                 _ => {
                     return Err(ParseError {
@@ -72,7 +81,11 @@ impl<'a> Parser<'a> {
             .is_some_and(|token| token.kind == expected)
     }
 
-    fn parse_section(&mut self) -> Result<Section, ParseError> {
+    pub(crate) fn parse_section(&mut self) -> Result<Section, ParseError> {
+        while self.current_is(TokenKind::Newline) {
+            self.cursor.advance();
+        }
+
         _ = self.expect_current(TokenKind::LBracket)?;
 
         let token = self.expect_current(TokenKind::Identifier)?;
@@ -139,10 +152,14 @@ impl<'a> Parser<'a> {
         Ok(entries)
     }
 
-    fn parse_entry(&mut self) -> Result<Entry, ParseError> {
+    pub(crate) fn parse_entry(&mut self) -> Result<Entry, ParseError> {
         let mut key = None::<String>;
         let mut values = Vec::<String>::new();
         let mut buffer = None::<String>;
+
+        while self.current_is(TokenKind::Newline) {
+            self.cursor.advance();
+        }
 
         loop {
             if let Some(token) = self.cursor.current() {
@@ -162,8 +179,7 @@ impl<'a> Parser<'a> {
                         let value = token.view().to_owned();
 
                         match buffer {
-                            // TODO: If two literals follow each other before reaching
-                            // an equal sign, the key will have a space in it. Is this allowed?
+                            // TODO(Nic): Can keys have whitespaces in it?
                             Some(ref mut b) => {
                                 b.push(' ');
                                 b.push_str(&value);
@@ -273,6 +289,7 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Error that can occur while parsing an INF-formatted buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseError {
     kind: ErrorKind,
@@ -280,18 +297,26 @@ pub struct ParseError {
 }
 
 impl ParseError {
+    #[must_use]
     pub const fn kind(&self) -> ErrorKind {
         self.kind
     }
 }
 
+/// Errors that can occur while parsing an INF-formatted buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorKind {
+    /// Invalid token.
     UnexpectedToken {
+        /// Expected token kind.
         expected: TokenKind,
+        /// Actual token kind.
         actual: Option<TokenKind>,
     },
+    /// Invalid section name.
     InvalidSectionName {
+        /// Parent error in a chain of causes.
         source: SectionError,
     },
 }
@@ -597,6 +622,29 @@ mod tests {
                         ])),
                         Entry::Item("key".to_owned(), Value::Raw("value".to_owned())),
                     ]
+                )
+                .unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn key_with_whitespace() {
+        let input = "\
+            [Section]\n\
+            key with spaces = value\
+        ";
+        let inf = Parser::new(input).parse().unwrap();
+
+        assert_eq!(
+            inf.sections,
+            vec![
+                Section::new(
+                    "Section".to_owned(),
+                    vec![Entry::Item(
+                        "key with spaces".to_owned(),
+                        Value::Raw("value".to_owned())
+                    ),]
                 )
                 .unwrap()
             ]

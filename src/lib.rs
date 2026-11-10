@@ -21,8 +21,10 @@ use std::{fmt, io};
 use encoding_rs::WINDOWS_1252;
 
 pub use crate::entry::Entry;
-use crate::parser::{ParseError, Parser};
-pub use crate::section::Section;
+use crate::parser::Parser;
+pub use crate::parser::{ErrorKind, ParseError};
+pub use crate::section::{AddRegistryEntry, InvalidAddRegistryEntry, Section, SectionError};
+pub use crate::strkey::{ExpandError, expand};
 pub use crate::value::Value;
 
 mod cursor;
@@ -31,6 +33,7 @@ mod lexer;
 mod parser;
 mod section;
 mod span;
+mod strkey;
 mod token;
 mod value;
 

@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::fmt;
+use std::str::FromStr;
 
 use crate::entry::Entry;
+use crate::parser::{ParseError, Parser};
 use crate::value::Value;
 
 /// Group of entries in an [`Inf`][crate::Inf].
@@ -100,13 +102,82 @@ impl Section {
             Entry::Item(_, value) | Entry::ValueOnly(value) => value,
         })
     }
+
+    /// Converts this section into a collection of validated [`AddRegistryEntry`] values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an entry has an unexpected kind or contains fewer than five elements.
+    ///
+    /// Each entry must be a `Value::List` containing at least five elements, corresponding to
+    /// the registry root, subkey, entry name, flags, and value, respectively. Remaining elements
+    /// are preserved as additional arguments.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::str::FromStr as _;
+    /// use inf::{Section, InvalidAddRegistryEntry};
+    ///
+    /// let section = Section::from_str(r#"
+    ///     [Section]
+    ///     HKCU,"Control Panel\Cursors\Schemes","%SCHEME_NAME%",,"%10%\%CUR_DIR%\Default.ani"
+    /// "#)?;
+    ///
+    /// let entries = section.as_add_registry_section().collect::<Result<Vec<_>, InvalidAddRegistryEntry>>()?;
+    /// let entry = entries.first().unwrap();
+    ///
+    /// assert_eq!(entry.root, "HKCU");
+    /// assert_eq!(entry.subkey, r"Control Panel\Cursors\Schemes");
+    /// assert_eq!(entry.entry_name, "%SCHEME_NAME%");
+    /// assert_eq!(entry.flags, "");
+    /// assert_eq!(entry.value, r"%10%\%CUR_DIR%\Default.ani");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn as_add_registry_section(
+        &self,
+    ) -> impl Iterator<Item = Result<AddRegistryEntry<'_>, InvalidAddRegistryEntry>> {
+        self.entries.iter().enumerate().map(|(index, entry)| {
+            let Entry::ValueOnly(Value::List(values)) = entry else {
+                return Err(InvalidAddRegistryEntry::EntryKind { index });
+            };
+
+            let [root, subkey, entry_name, flags, value, additional @ ..] = values.as_slice()
+            else {
+                return Err(InvalidAddRegistryEntry::NotEnoughArguments);
+            };
+
+            Ok(AddRegistryEntry {
+                root,
+                subkey,
+                entry_name,
+                flags,
+                value,
+                additional,
+            })
+        })
+    }
 }
 
+impl FromStr for Section {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Parser::new(s).parse_section()
+    }
+}
+
+/// Errors that can occur while creating a section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SectionError {
+    /// Section name cannot be empty.
     Empty,
-    TooLong { length: usize },
+    /// Section name exceeds 255 bytes.
+    TooLong {
+        /// Length of section name.
+        length: usize,
+    },
 }
 
 impl Error for SectionError {
@@ -141,5 +212,41 @@ impl<'a> From<&'a str> for Query<'a> {
 impl From<usize> for Query<'_> {
     fn from(value: usize) -> Self {
         Self::Index(value)
+    }
+}
+
+/// Entry under an `AddReg`-specified section that is known to be valid.
+///
+/// Sections specified by the `AddReg` directive must follow a particular structure, allowing us to
+/// make assumptions about their entries. This is a convenience type that simplifies working with
+/// such entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddRegistryEntry<'a> {
+    pub root: &'a str,
+    pub subkey: &'a str,
+    pub entry_name: &'a str,
+    pub flags: &'a str,
+    pub value: &'a str,
+    pub additional: &'a [String],
+}
+
+#[derive(Debug)]
+pub enum InvalidAddRegistryEntry {
+    EntryKind { index: usize },
+    NotEnoughArguments,
+}
+
+impl Error for InvalidAddRegistryEntry {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
+
+impl fmt::Display for InvalidAddRegistryEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::EntryKind { index } => write!(f, "entry #{index} has an invalid entry kind"),
+            Self::NotEnoughArguments => "expected 5 or more comma-delimited values".fmt(f),
+        }
     }
 }

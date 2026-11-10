@@ -3,13 +3,27 @@ use static_assertions::assert_not_impl_all;
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
-/// Performs lexical analysis and returns an iterator of [`Token`]s.
-#[must_use]
-pub fn tokenize(input: &str) -> Tokens<'_> {
-    Tokens {
-        input,
-        position: 0,
-        mode: Mode::Normal,
+/// Represents an on-going lexical analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lexer<'a> {
+    input: &'a str,
+}
+
+impl<'a> Lexer<'a> {
+    /// Creates a new [`Lexer`].
+    #[must_use]
+    pub const fn new(input: &'a str) -> Self {
+        Self { input }
+    }
+
+    /// Performs lexical analysis; returns an iterator of [`Token`]s.
+    #[must_use]
+    pub fn tokens(&self) -> Tokens<'a> {
+        Tokens {
+            input: self.input,
+            position: 0,
+            mode: Mode::Normal,
+        }
     }
 }
 
@@ -17,7 +31,6 @@ pub fn tokenize(input: &str) -> Tokens<'_> {
 // https://clippy.rust-lang.org/rust-1.99.0/index.html#copy_iterator
 assert_not_impl_all!(Tokens: Copy);
 
-/// Represents an on-going lexical analysis.
 #[derive(Debug, Clone)]
 pub struct Tokens<'a> {
     input: &'a str,
@@ -173,15 +186,12 @@ impl<'a> Tokens<'a> {
     fn string(&mut self) -> LexResult<'a> {
         let start = self.position;
 
+        // Checks for the terminating string delimiter.
         match (self.current(), self.peek()) {
             (b'"', Some(b'"')) => {
                 self.position += 2;
             }
 
-            // Because strings share the same start and end delimiter, to reset the lexer's mode,
-            // the DoubleQuote token must be returned from within String mode. Otherwise,
-            // if Normal mode is set too soon, the next iteration will correctly return
-            // the DoubleQuote token, but incorrectly set the mode back to String.
             (b'"', Some(_) | None) => {
                 self.position += 1;
                 self.mode = Mode::Normal;
@@ -197,6 +207,7 @@ impl<'a> Tokens<'a> {
             }
         }
 
+        // Breaks when the next character is the terminating string delimiter.
         while self.position < self.input.len() {
             match self.current() {
                 b'"' => {
@@ -226,7 +237,10 @@ mod tests {
     #[test]
     fn simple_section() {
         let input = "[Section]";
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
@@ -241,7 +255,10 @@ mod tests {
     #[test]
     fn section_with_semicolon() {
         let input = "[; Std.Mfg ]";
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
@@ -256,7 +273,10 @@ mod tests {
     #[test]
     fn comment() {
         let input = "; This is a comment";
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(tokens, vec![]);
     }
@@ -264,7 +284,10 @@ mod tests {
     #[test]
     fn string() {
         let input = r#""This is a string with a ""nested string"".""#;
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
@@ -279,7 +302,10 @@ mod tests {
     #[test]
     fn unterminated_string() {
         let input = "\"This is an unterminated string";
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(tokens, vec![TokenKind::DoubleQuote, TokenKind::String]);
     }
@@ -287,7 +313,10 @@ mod tests {
     #[test]
     fn item_raw_entry() {
         let input = r#"Signature = "$CHICAGO$""#;
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
@@ -304,7 +333,10 @@ mod tests {
     #[test]
     fn item_raw_entry_unquoted() {
         let input = r"Signature = $CHICAGO$";
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
@@ -315,7 +347,10 @@ mod tests {
     #[test]
     fn item_list_entry() {
         let input = r#"Scheme.Cur=10,"%CUR_DIR%""#;
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
@@ -334,7 +369,10 @@ mod tests {
     #[test]
     fn value_only_raw_entry() {
         let input = "Cursor Default.ani";
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(tokens, vec![TokenKind::Literal, TokenKind::Literal]);
     }
@@ -348,7 +386,10 @@ mod tests {
             Cursor Text.ani\n\
             Cursor Unavailable.ani\
         ";
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
@@ -375,7 +416,10 @@ mod tests {
     fn value_only_list_entries() {
         let input =
             r#"HKCU,"Control Panel\Cursors\Schemes","%SCHEME_NAME%",,"%10%\%CUR_DIR%\%default%""#;
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
@@ -406,7 +450,10 @@ mod tests {
             key=value\n\
             value1,value2,,\"value4\" ; Comment\
         ";
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
@@ -445,7 +492,10 @@ mod tests {
             \"Hello, \" \\\n\
             \"World!\"\
         ";
-        let tokens = tokenize(input).map(|token| token.kind).collect::<Vec<_>>();
+        let tokens = Lexer::new(input)
+            .tokens()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             tokens,
