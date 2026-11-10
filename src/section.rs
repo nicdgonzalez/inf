@@ -220,6 +220,7 @@ impl From<usize> for Query<'_> {
 /// Sections specified by the `AddReg` directive must follow a particular structure, allowing us to
 /// make assumptions about their entries. This is a convenience type that simplifies working with
 /// such entries.
+#[expect(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddRegistryEntry<'a> {
     pub root: &'a str,
@@ -230,9 +231,16 @@ pub struct AddRegistryEntry<'a> {
     pub additional: &'a [String],
 }
 
+/// Errors that can occur while validating entries in an `AddReg` section.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum InvalidAddRegistryEntry {
-    EntryKind { index: usize },
+    /// Entry must be [`Entry::Item`].
+    EntryKind {
+        /// Entry index.
+        index: usize,
+    },
+    /// Entries must have 5 or more values.
     NotEnoughArguments,
 }
 

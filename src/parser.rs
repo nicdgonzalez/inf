@@ -297,6 +297,7 @@ pub struct ParseError {
 }
 
 impl ParseError {
+    /// Detailed error that occurred.
     #[must_use]
     pub const fn kind(&self) -> ErrorKind {
         self.kind
