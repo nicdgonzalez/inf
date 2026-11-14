@@ -50,6 +50,12 @@ pub struct Inf {
 }
 
 impl Inf {
+    /// Creates a new [`Inf`].
+    #[must_use]
+    pub const fn new(sections: Vec<Section>) -> Self {
+        Self { sections }
+    }
+
     /// Creates an [`Inf`] from the file at `path`.
     ///
     /// # Errors
