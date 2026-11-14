@@ -257,6 +257,11 @@ impl<'a> Parser<'a> {
     fn parse_string(&mut self) -> Result<String, ParseError> {
         _ = self.expect_current(TokenKind::DoubleQuote)?;
 
+        if self.current_is(TokenKind::DoubleQuote) {
+            self.cursor.advance();
+            return Ok(String::new());
+        }
+
         let token = self.expect_current(TokenKind::String)?;
         let string = Self::normalize_string(token);
 
@@ -631,6 +636,8 @@ mod tests {
 
     #[test]
     fn key_with_whitespace() {
+        // TODO: Not sure if keys are allowed to contain spaces. Remove this comment when there is
+        // a comment containing a source saying either yes or no.
         let input = "\
             [Section]\n\
             key with spaces = value\
@@ -646,6 +653,26 @@ mod tests {
                         "key with spaces".to_owned(),
                         Value::Raw("value".to_owned())
                     ),]
+                )
+                .unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_string_value() {
+        let input = r#"
+            [Section]
+            ""
+        "#;
+        let inf = Parser::new(input).parse().unwrap();
+
+        assert_eq!(
+            inf.sections,
+            vec![
+                Section::new(
+                    "Section".to_owned(),
+                    vec![Entry::ValueOnly(Value::Raw(String::new()))],
                 )
                 .unwrap()
             ]
